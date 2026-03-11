@@ -108,10 +108,78 @@ loss_fn.reset_queue()
 
 **Queue size guidance:** For `quantile=0.005` (top 50 bps) you need at least ~200 samples in the pool for a meaningful 99.5th percentile estimate.
 
+## `LossWarmupWrapper` — BCE/CE warmup + geometric temperature decay
+
+A wrapper that lets you train with a standard loss (e.g. `CrossEntropyLoss`) for an initial warm-up period, then switch to a ranking loss with a geometrically decaying temperature schedule.
+
+```
+temp(t) = temp_start × (temp_end / temp_start) ^ (elapsed_steps / temp_decay_steps)
+```
+
+The schedule clock starts at the moment of phase switch, not at training start.
+
+### Usage (PyTorch Lightning)
+
+```python
+from ap_loss import SmoothAPLoss
+from warmup_wrapper import LossWarmupWrapper
+
+class MyModel(pl.LightningModule):
+    def __init__(self):
+        super().__init__()
+        self.loss_fn = LossWarmupWrapper(
+            warmup_loss=nn.CrossEntropyLoss(),
+            main_loss=SmoothAPLoss(num_classes=10, queue_size=1024),
+            warmup_epochs=5,
+            temp_start=0.05,   # soft at switch — stable gradients
+            temp_end=0.005,    # sharp after schedule — closer to true rank
+            temp_decay_steps=10_000,
+            reset_queue_each_epoch=True,
+        )
+
+    def on_train_epoch_start(self):
+        self.loss_fn.on_train_epoch_start(self.current_epoch)
+
+    def on_train_batch_start(self, batch, batch_idx):
+        self.loss_fn.on_train_batch_start(self.global_step)
+
+    def training_step(self, batch, batch_idx):
+        logits, targets = batch
+        loss = self.loss_fn(logits, targets)
+        self.log("train/loss", loss)
+        self.log("train/in_warmup", float(self.loss_fn.in_warmup))
+        if (t := self.loss_fn.current_temperature) is not None:
+            self.log("train/temperature", t)
+        return loss
+```
+
+`**kwargs` (e.g. `return_per_class=True`) are forwarded to `main_loss` only; they are silently ignored during warmup.
+
+### Parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `warmup_loss` | required | Loss used during warmup; must accept `(logits, targets)` |
+| `main_loss` | required | Loss used after warmup; must accept `(logits, targets, **kwargs)` |
+| `warmup_epochs` | required | Epochs to use `warmup_loss`; `0` to skip warmup entirely |
+| `temp_start` | required | Temperature at phase switch |
+| `temp_end` | required | Temperature after `temp_decay_steps` steps |
+| `temp_decay_steps` | required | Steps over which to decay temperature |
+| `reset_queue_each_epoch` | `False` | Call `main_loss.reset_queue()` at the start of each main-phase epoch |
+
+### Properties / methods
+
+| | Description |
+|---|---|
+| `in_warmup` | `True` while `epoch < warmup_epochs` |
+| `current_temperature` | Current `main_loss.temperature`, or `None` if unavailable |
+| `on_train_epoch_start(epoch)` | Advance epoch counter; detect phase switch; optionally reset queue |
+| `on_train_batch_start(global_step)` | Latch `switch_step` on first main-phase batch; update temperature |
+
 ## Tests
 
 ```bash
-pytest test_smooth_ap_loss.py test_recall_at_quantile_loss.py -v
+pytest test_smooth_ap_loss.py test_recall_at_quantile_loss.py test_warmup_wrapper.py -v
 ```
 
 ## References
