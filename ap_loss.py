@@ -310,6 +310,8 @@ class SmoothAPLoss(nn.Module):
         ...     self.log(f"train/ap_loss_class_{c}", per_class[c])
         >>> return loss
         """
+        if targets.ndim == 2 and targets.size(1) == 1:
+            targets = targets.squeeze(1)
         if logits.ndim != 2 or logits.size(1) != self.num_classes:
             raise ValueError(f"Expected logits [N, {self.num_classes}], got {tuple(logits.shape)}")
         if targets.ndim != 1 or targets.size(0) != logits.size(0):
