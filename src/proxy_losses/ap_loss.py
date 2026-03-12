@@ -64,8 +64,9 @@ class SmoothAPLoss(nn.Module):
 
     Notes
     -----
-    Complexity of _compute_smooth_ap is O(M^2) in both memory and compute,
-    where M = batch_size + queue_size. Keep M <= ~4096 for practical use.
+    Complexity of _compute_smooth_ap is O(|P| × M), where |P| is the number
+    of positives in the pool and M = batch_size + queue_size. At low positive
+    rates this is much cheaper than the naive O(M²) formulation.
     """
 
     def __init__(
@@ -218,12 +219,15 @@ class SmoothAPLoss(nn.Module):
 
         Notes
         -----
-        Pairwise soft rank:
-            diff[i, j]    = s_j - s_i
-            soft_gt[i, j] ≈ P(s_j > s_i) = σ(diff[i,j] / τ)
-            rank_all[i]   = 1 + Σ_j soft_gt[i, j]     (diagonal zeroed)
-            rank_pos[i]   = 1 + Σ_{j∈P} soft_gt[i, j]
-            AP            = mean_{i∈P} rank_pos[i] / rank_all[i]
+        Pairwise soft rank (computed only for positive rows):
+            diff[k, j]    = s_j - s_pos_k            k ∈ P, j ∈ [M]
+            soft_gt[k, j] ≈ P(s_j > s_pos_k) = σ(diff[k,j] / τ)
+            rank_all[k]   = 1 + Σ_j soft_gt[k, j]   (self zeroed)
+            rank_pos[k]   = 1 + Σ_{j∈P} soft_gt[k, j]
+            AP            = mean_{k∈P} rank_pos[k] / rank_all[k]
+
+        Complexity is O(|P| × M) rather than O(M²), reducing memory and
+        compute by roughly 1/pos_rate (e.g. ~200× at 0.5% positives).
         """
         m     = scores.size(0)
         n_pos = int(is_pos.sum())
@@ -231,14 +235,20 @@ class SmoothAPLoss(nn.Module):
         if n_pos == 0 or n_pos == m:
             return scores.new_zeros(()), False
 
-        diff    = scores.unsqueeze(0) - scores.unsqueeze(1)  # [M, M]; diff[i,j] = s_j - s_i
-        soft_gt = torch.sigmoid(diff / tau)
-        soft_gt = soft_gt.masked_fill(torch.eye(m, device=scores.device, dtype=torch.bool), 0.0)
+        # Only compute rows for positives: [|P|, M] instead of [M, M].
+        # Reduces memory/compute by ~1/pos_rate (e.g. 200× at 0.5% positives).
+        pos_idx  = is_pos.nonzero(as_tuple=False).squeeze(1)           # [P]
+        diff_pos = scores.unsqueeze(0) - scores[pos_idx].unsqueeze(1)  # [P, M]; diff[k,j] = s_j - s_pos_k
+        soft_gt  = torch.sigmoid(diff_pos / tau)                        # [P, M]
+        # Zero self-comparisons without in-place ops (would break autograd).
+        self_mask = torch.zeros(n_pos, m, device=scores.device, dtype=torch.bool)
+        self_mask[torch.arange(n_pos, device=scores.device), pos_idx] = True
+        soft_gt   = soft_gt.masked_fill(self_mask, 0.0)
 
-        rank_all = 1.0 + soft_gt.sum(dim=1)
-        rank_pos = 1.0 + (soft_gt * is_pos.float().unsqueeze(0)).sum(dim=1)
+        rank_all = 1.0 + soft_gt.sum(dim=1)            # [P]
+        rank_pos = 1.0 + soft_gt[:, is_pos].sum(dim=1) # [P]
 
-        ap = (rank_pos[is_pos] / rank_all[is_pos]).mean()
+        ap = (rank_pos / rank_all).mean()
         return ap, True
 
     def _should_update_queue(self) -> bool:
