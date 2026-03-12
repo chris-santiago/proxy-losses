@@ -20,8 +20,7 @@ import torch.nn as nn
 from sklearn.datasets import make_classification
 from sklearn.metrics import average_precision_score
 
-from proxy_losses import SmoothAPLoss
-from proxy_losses import LossWarmupWrapper
+from proxy_losses import LossWarmupWrapper, RecallAtQuantileLoss, SmoothAPLoss
 
 # ── synthetic data ──────────────────────────────────────────────────────────
 
@@ -94,6 +93,22 @@ def evaluate(model: nn.Module, X: torch.Tensor, y: torch.Tensor) -> float:
 # ── training loop ───────────────────────────────────────────────────────────
 
 
+def make_main_loss(
+    loss: str,
+    queue_size: int,
+    temp_start: float,
+    quantile: float,
+) -> nn.Module:
+    if loss == "recall":
+        return RecallAtQuantileLoss(
+            num_classes=1,
+            queue_size=queue_size,
+            quantile=quantile,
+            temperature=temp_start,
+        )
+    return SmoothAPLoss(num_classes=1, queue_size=queue_size, temperature=temp_start)
+
+
 def train(
     warmup_epochs: int = 3,
     blend_epochs: int = 2,
@@ -104,6 +119,8 @@ def train(
     temp_start: float = 0.5,
     temp_end: float = 0.01,
     pos_rate: float = 0.005,
+    loss: str = "ap",
+    quantile: float | None = None,
     decay_steps: int | None = None,
     seed: int = 42,
 ):
@@ -111,19 +128,23 @@ def train(
     X_train, y_train, X_val, y_val = make_data(pos_rate=pos_rate, seed=seed)
     n = X_train.shape[0]
     steps_per_epoch = math.ceil(n / batch_size)
-    temp_decay_steps = decay_steps if decay_steps is not None else (total_epochs - warmup_epochs) * steps_per_epoch
+    temp_decay_steps = (
+        decay_steps
+        if decay_steps is not None
+        else (total_epochs - warmup_epochs) * steps_per_epoch
+    )
+    q = quantile if quantile is not None else pos_rate
 
     model = TinyMLP()
     loss_fn = LossWarmupWrapper(
         warmup_loss=BCEWarmupLoss(),
-        main_loss=SmoothAPLoss(
-            num_classes=1, queue_size=queue_size, temperature=temp_start
-        ),
+        main_loss=make_main_loss(loss, queue_size, temp_start, q),
         warmup_epochs=warmup_epochs,
         blend_epochs=blend_epochs,
         temp_start=temp_start,
         temp_end=temp_end,
         temp_decay_steps=temp_decay_steps,
+        reset_queue_each_epoch=False,
     )
     opt = torch.optim.Adam(model.parameters(), lr=lr)
 
@@ -189,8 +210,24 @@ if __name__ == "__main__":
     p.add_argument("--temp-start", type=float, default=0.35)
     p.add_argument("--temp-end", type=float, default=0.01)
     p.add_argument("--pos-rate", type=float, default=0.005)
-    p.add_argument("--decay-steps", type=int, default=None,
-                   help="temperature decay steps (default: AP-phase steps)")
+    p.add_argument(
+        "--loss",
+        choices=["ap", "recall"],
+        default="ap",
+        help="main loss: SmoothAPLoss (ap) or RecallAtQuantileLoss (recall)",
+    )
+    p.add_argument(
+        "--quantile",
+        type=float,
+        default=None,
+        help="quantile for RecallAtQuantileLoss (default: pos-rate)",
+    )
+    p.add_argument(
+        "--decay-steps",
+        type=int,
+        default=None,
+        help="temperature decay steps (default: AP-phase steps)",
+    )
     p.add_argument("--seed", type=int, default=42)
     args = p.parse_args()
     train(**vars(args))

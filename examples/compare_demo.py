@@ -26,7 +26,7 @@ import torch.nn as nn
 from sklearn.datasets import make_classification
 from sklearn.metrics import average_precision_score
 
-from proxy_losses import LossWarmupWrapper, SmoothAPLoss
+from proxy_losses import LossWarmupWrapper, SmoothAPLoss, RecallAtQuantileLoss
 
 # ── synthetic data ──────────────────────────────────────────────────────────
 
@@ -136,6 +136,19 @@ def run_one(
 # ── compare ─────────────────────────────────────────────────────────────────
 
 
+def make_main_loss(
+    loss: str,
+    queue_size: int,
+    temp_start: float,
+    quantile: float,
+) -> nn.Module:
+    if loss == "recall":
+        return RecallAtQuantileLoss(
+            num_classes=1, queue_size=queue_size, quantile=quantile, temperature=temp_start
+        )
+    return SmoothAPLoss(num_classes=1, queue_size=queue_size, temperature=temp_start)
+
+
 def compare(
     warmup_epochs: int = 3,
     blend_epochs: int = 2,
@@ -146,12 +159,15 @@ def compare(
     temp_start: float = 0.35,
     temp_end: float = 0.01,
     pos_rate: float = 0.005,
+    loss: str = "ap",
+    quantile: float | None = None,
     decay_steps: int | None = None,
     seed: int = 42,
 ):
     X_train, y_train, X_val, y_val = make_data(pos_rate=pos_rate, seed=seed)
     n = X_train.shape[0]
     steps_per_epoch = math.ceil(n / batch_size)
+    q = quantile if quantile is not None else pos_rate
     shared = dict(
         X_train=X_train,
         y_train=y_train,
@@ -163,12 +179,10 @@ def compare(
         seed=seed,
     )
 
-    # warmup-only: BCE for all epochs, no AP loss
+    # warmup-only: BCE for all epochs, never switches to main loss
     warmup_only_fn = LossWarmupWrapper(
         warmup_loss=BCEWarmupLoss(),
-        main_loss=SmoothAPLoss(
-            num_classes=1, queue_size=queue_size, temperature=temp_start
-        ),
+        main_loss=make_main_loss(loss, queue_size, temp_start, q),
         warmup_epochs=total_epochs,  # warmup never ends
         blend_epochs=0,
         temp_start=temp_start,
@@ -176,12 +190,10 @@ def compare(
         temp_decay_steps=decay_steps if decay_steps is not None else total_epochs * steps_per_epoch,
     )
 
-    # AP-only: SmoothAPLoss from epoch 0, no warmup
-    ap_only_fn = LossWarmupWrapper(
+    # main loss only: from epoch 0, no warmup
+    main_only_fn = LossWarmupWrapper(
         warmup_loss=BCEWarmupLoss(),
-        main_loss=SmoothAPLoss(
-            num_classes=1, queue_size=queue_size, temperature=temp_start
-        ),
+        main_loss=make_main_loss(loss, queue_size, temp_start, q),
         warmup_epochs=0,
         blend_epochs=0,
         temp_start=temp_start,
@@ -189,12 +201,10 @@ def compare(
         temp_decay_steps=decay_steps if decay_steps is not None else total_epochs * steps_per_epoch,
     )
 
-    # warmup + blend + AP
+    # warmup + blend + main loss
     warmup_blend_fn = LossWarmupWrapper(
         warmup_loss=BCEWarmupLoss(),
-        main_loss=SmoothAPLoss(
-            num_classes=1, queue_size=queue_size, temperature=temp_start
-        ),
+        main_loss=make_main_loss(loss, queue_size, temp_start, q),
         warmup_epochs=warmup_epochs,
         blend_epochs=blend_epochs,
         temp_start=temp_start,
@@ -206,11 +216,12 @@ def compare(
         f"warmup_epochs={warmup_epochs}  blend_epochs={blend_epochs}  "
         f"total_epochs={total_epochs}  pos_rate={pos_rate}\n"
     )
+    loss_label = loss.upper()
     print("Running warmup-only...")
     r_warmup = run_one(warmup_only_fn, **shared)
-    print("Running AP-only...")
-    r_ap = run_one(ap_only_fn, **shared)
-    print("Running warmup+blend+AP...")
+    print(f"Running {loss_label}-only...")
+    r_main = run_one(main_only_fn, **shared)
+    print(f"Running warmup+blend+{loss_label}...")
     r_blend = run_one(warmup_blend_fn, **shared)
 
     # ── phase label helper ───────────────────────────────────────────────────
@@ -223,21 +234,23 @@ def compare(
 
     # ── side-by-side table ───────────────────────────────────────────────────
     col = 12
+    main_col_label = f"{loss_label}-only"
+    blend_col_label = f"warmup+blend"
     print(
         f"\n{'epoch':>5}  {'phase':>6}  "
-        f"{'warmup-only':>{col}}  {'AP-only':>{col}}  {'warmup+blend':>{col}}"
+        f"{'warmup-only':>{col}}  {main_col_label:>{col}}  {blend_col_label:>{col}}"
     )
     print("-" * (5 + 2 + 6 + 2 + col + 2 + col + 2 + col))
-    for epoch, (wu, ap, wb) in enumerate(zip(r_warmup, r_ap, r_blend)):
+    for epoch, (wu, mn, wb) in enumerate(zip(r_warmup, r_main, r_blend)):
         print(
             f"{epoch:5d}  {phase_label(epoch):>6}  "
-            f"{wu:{col}.4f}  {ap:{col}.4f}  {wb:{col}.4f}"
+            f"{wu:{col}.4f}  {mn:{col}.4f}  {wb:{col}.4f}"
         )
 
     print()
     print(
         f"Best AUCPR  warmup-only: {max(r_warmup):.4f}  "
-        f"AP-only: {max(r_ap):.4f}  warmup+blend: {max(r_blend):.4f}"
+        f"{main_col_label}: {max(r_main):.4f}  {blend_col_label}: {max(r_blend):.4f}"
     )
 
 
@@ -256,6 +269,10 @@ if __name__ == "__main__":
     p.add_argument("--temp-start", type=float, default=0.35)
     p.add_argument("--temp-end", type=float, default=0.01)
     p.add_argument("--pos-rate", type=float, default=0.005)
+    p.add_argument("--loss", choices=["ap", "recall"], default="ap",
+                   help="main loss: SmoothAPLoss (ap) or RecallAtQuantileLoss (recall)")
+    p.add_argument("--quantile", type=float, default=None,
+                   help="quantile for RecallAtQuantileLoss (default: pos-rate)")
     p.add_argument("--decay-steps", type=int, default=None,
                    help="temperature decay steps (default: AP-phase steps per strategy)")
     p.add_argument("--seed", type=int, default=42)
