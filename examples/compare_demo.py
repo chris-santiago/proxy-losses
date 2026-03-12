@@ -26,8 +26,7 @@ import torch.nn as nn
 from sklearn.datasets import make_classification
 from sklearn.metrics import average_precision_score
 
-from proxy_losses import SmoothAPLoss
-from proxy_losses import LossWarmupWrapper
+from proxy_losses import LossWarmupWrapper, SmoothAPLoss
 
 # ── synthetic data ──────────────────────────────────────────────────────────
 
@@ -147,51 +146,66 @@ def compare(
     temp_start: float = 0.35,
     temp_end: float = 0.01,
     pos_rate: float = 0.005,
+    decay_steps: int | None = None,
     seed: int = 42,
 ):
     X_train, y_train, X_val, y_val = make_data(pos_rate=pos_rate, seed=seed)
     n = X_train.shape[0]
     steps_per_epoch = math.ceil(n / batch_size)
     shared = dict(
-        X_train=X_train, y_train=y_train, X_val=X_val, y_val=y_val,
-        total_epochs=total_epochs, batch_size=batch_size, lr=lr, seed=seed,
+        X_train=X_train,
+        y_train=y_train,
+        X_val=X_val,
+        y_val=y_val,
+        total_epochs=total_epochs,
+        batch_size=batch_size,
+        lr=lr,
+        seed=seed,
     )
 
     # warmup-only: BCE for all epochs, no AP loss
     warmup_only_fn = LossWarmupWrapper(
         warmup_loss=BCEWarmupLoss(),
-        main_loss=SmoothAPLoss(num_classes=1, queue_size=queue_size, temperature=temp_start),
+        main_loss=SmoothAPLoss(
+            num_classes=1, queue_size=queue_size, temperature=temp_start
+        ),
         warmup_epochs=total_epochs,  # warmup never ends
         blend_epochs=0,
         temp_start=temp_start,
         temp_end=temp_end,
-        temp_decay_steps=total_epochs * steps_per_epoch,
+        temp_decay_steps=decay_steps if decay_steps is not None else total_epochs * steps_per_epoch,
     )
 
     # AP-only: SmoothAPLoss from epoch 0, no warmup
     ap_only_fn = LossWarmupWrapper(
         warmup_loss=BCEWarmupLoss(),
-        main_loss=SmoothAPLoss(num_classes=1, queue_size=queue_size, temperature=temp_start),
+        main_loss=SmoothAPLoss(
+            num_classes=1, queue_size=queue_size, temperature=temp_start
+        ),
         warmup_epochs=0,
         blend_epochs=0,
         temp_start=temp_start,
         temp_end=temp_end,
-        temp_decay_steps=total_epochs * steps_per_epoch,
+        temp_decay_steps=decay_steps if decay_steps is not None else total_epochs * steps_per_epoch,
     )
 
     # warmup + blend + AP
     warmup_blend_fn = LossWarmupWrapper(
         warmup_loss=BCEWarmupLoss(),
-        main_loss=SmoothAPLoss(num_classes=1, queue_size=queue_size, temperature=temp_start),
+        main_loss=SmoothAPLoss(
+            num_classes=1, queue_size=queue_size, temperature=temp_start
+        ),
         warmup_epochs=warmup_epochs,
         blend_epochs=blend_epochs,
         temp_start=temp_start,
         temp_end=temp_end,
-        temp_decay_steps=(total_epochs - warmup_epochs) * steps_per_epoch,
+        temp_decay_steps=decay_steps if decay_steps is not None else (total_epochs - warmup_epochs) * steps_per_epoch,
     )
 
-    print(f"warmup_epochs={warmup_epochs}  blend_epochs={blend_epochs}  "
-          f"total_epochs={total_epochs}  pos_rate={pos_rate}\n")
+    print(
+        f"warmup_epochs={warmup_epochs}  blend_epochs={blend_epochs}  "
+        f"total_epochs={total_epochs}  pos_rate={pos_rate}\n"
+    )
     print("Running warmup-only...")
     r_warmup = run_one(warmup_only_fn, **shared)
     print("Running AP-only...")
@@ -221,8 +235,10 @@ def compare(
         )
 
     print()
-    print(f"Final AUCPR  warmup-only: {r_warmup[-1]:.4f}  "
-          f"AP-only: {r_ap[-1]:.4f}  warmup+blend: {r_blend[-1]:.4f}")
+    print(
+        f"Best AUCPR  warmup-only: {max(r_warmup):.4f}  "
+        f"AP-only: {max(r_ap):.4f}  warmup+blend: {max(r_blend):.4f}"
+    )
 
 
 # ── main ────────────────────────────────────────────────────────────────────
@@ -240,6 +256,8 @@ if __name__ == "__main__":
     p.add_argument("--temp-start", type=float, default=0.35)
     p.add_argument("--temp-end", type=float, default=0.01)
     p.add_argument("--pos-rate", type=float, default=0.005)
+    p.add_argument("--decay-steps", type=int, default=None,
+                   help="temperature decay steps (default: AP-phase steps per strategy)")
     p.add_argument("--seed", type=int, default=42)
     args = p.parse_args()
     compare(**vars(args))

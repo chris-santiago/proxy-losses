@@ -104,13 +104,14 @@ def train(
     temp_start: float = 0.5,
     temp_end: float = 0.01,
     pos_rate: float = 0.005,
+    decay_steps: int | None = None,
     seed: int = 42,
 ):
     torch.manual_seed(seed)
     X_train, y_train, X_val, y_val = make_data(pos_rate=pos_rate, seed=seed)
     n = X_train.shape[0]
     steps_per_epoch = math.ceil(n / batch_size)
-    temp_decay_steps = (total_epochs - warmup_epochs) * steps_per_epoch
+    temp_decay_steps = decay_steps if decay_steps is not None else (total_epochs - warmup_epochs) * steps_per_epoch
 
     model = TinyMLP()
     loss_fn = LossWarmupWrapper(
@@ -188,6 +189,8 @@ if __name__ == "__main__":
     p.add_argument("--temp-start", type=float, default=0.35)
     p.add_argument("--temp-end", type=float, default=0.01)
     p.add_argument("--pos-rate", type=float, default=0.005)
+    p.add_argument("--decay-steps", type=int, default=None,
+                   help="temperature decay steps (default: AP-phase steps)")
     p.add_argument("--seed", type=int, default=42)
     args = p.parse_args()
     train(**vars(args))
