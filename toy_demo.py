@@ -1,9 +1,9 @@
 """
 Toy binary classification demo: BCE warmup → blend → SmoothAP.
 
-Generates an imbalanced 2D dataset (5% positive rate), trains a small MLP,
-and prints AUCPR + loss after every epoch so you can see whether the
-warmup→AP transition helps or hurts ranking quality.
+Generates an imbalanced dataset via sklearn's make_classification, trains a
+small MLP, and prints AUCPR + loss after every epoch so you can see whether
+the warmup→AP transition helps or hurts.
 
 Usage:
     python toy_demo.py
@@ -27,8 +27,8 @@ from warmup_wrapper import LossWarmupWrapper
 
 
 def make_data(
-    n: int = 4000,
-    pos_rate: float = 0.05,
+    n: int = 60_000,
+    pos_rate: float = 0.005,
     seed: int = 42,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Return (X_train, y_train, X_val, y_val) using sklearn make_classification."""
@@ -98,15 +98,16 @@ def train(
     warmup_epochs: int = 3,
     blend_epochs: int = 2,
     total_epochs: int = 15,
-    batch_size: int = 128,
+    batch_size: int = 512,
     lr: float = 1e-3,
-    queue_size: int = 256,
+    queue_size: int = 2048,
     temp_start: float = 0.5,
     temp_end: float = 0.01,
+    pos_rate: float = 0.005,
     seed: int = 42,
 ):
     torch.manual_seed(seed)
-    X_train, y_train, X_val, y_val = make_data(seed=seed)
+    X_train, y_train, X_val, y_val = make_data(pos_rate=pos_rate, seed=seed)
     n = X_train.shape[0]
     steps_per_epoch = math.ceil(n / batch_size)
     temp_decay_steps = (total_epochs - warmup_epochs) * steps_per_epoch
@@ -181,11 +182,12 @@ if __name__ == "__main__":
     p.add_argument("--warmup-epochs", type=int, default=3)
     p.add_argument("--blend-epochs", type=int, default=2)
     p.add_argument("--total-epochs", type=int, default=15)
-    p.add_argument("--batch-size", type=int, default=128)
+    p.add_argument("--batch-size", type=int, default=512)
     p.add_argument("--lr", type=float, default=1e-3)
-    p.add_argument("--queue-size", type=int, default=256)
+    p.add_argument("--queue-size", type=int, default=2048)
     p.add_argument("--temp-start", type=float, default=0.35)
     p.add_argument("--temp-end", type=float, default=0.01)
+    p.add_argument("--pos-rate", type=float, default=0.005)
     p.add_argument("--seed", type=int, default=42)
     args = p.parse_args()
     train(**vars(args))

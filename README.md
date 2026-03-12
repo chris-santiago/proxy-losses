@@ -195,6 +195,30 @@ class MyModel(pl.LightningModule):
 | `on_train_epoch_start(epoch)` | Advance epoch counter; detect phase switch; optionally reset queue |
 | `on_train_batch_start(global_step)` | Latch `switch_step` on first main-phase batch; reset queue; update temperature |
 
+## Toy demo
+
+`toy_demo.py` trains a small MLP on an imbalanced binary classification task (default: 0.5% positive rate) using `make_classification` from scikit-learn. It prints epoch-by-epoch AUCPR so you can see whether the warmup→blend→AP transition helps or hurts.
+
+Requires the `demo` extras:
+
+```bash
+uv sync --extra demo
+# or: pip install scikit-learn
+```
+
+```bash
+# Default: 3 warmup + 2 blend epochs, then pure AP
+python toy_demo.py
+
+# Hard switch for comparison
+python toy_demo.py --blend-epochs 0
+
+# Easier problem
+python toy_demo.py --pos-rate 0.05
+```
+
+Key flags: `--pos-rate`, `--warmup-epochs`, `--blend-epochs`, `--total-epochs`, `--batch-size`, `--queue-size`, `--temp-start`, `--temp-end`, `--lr`, `--seed`.
+
 ## Tests
 
 ```bash
