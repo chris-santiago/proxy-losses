@@ -324,7 +324,7 @@ if __name__ == "__main__":
     import torch
     import torch.nn as nn
 
-    from ap_loss import SmoothAPLoss
+    from proxy_losses.ap_loss import SmoothAPLoss
 
     torch.manual_seed(0)
     C, B = 4, 16

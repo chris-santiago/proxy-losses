@@ -56,8 +56,8 @@ pip install torch>=2.10
 ## Usage
 
 ```python
-from ap_loss import SmoothAPLoss
-from recall_loss import RecallAtQuantileLoss
+from proxy_losses import SmoothAPLoss
+from proxy_losses import RecallAtQuantileLoss
 
 # Multi-class AP loss
 loss_fn = SmoothAPLoss(num_classes=4, queue_size=1024, temperature=0.01)
@@ -137,8 +137,8 @@ With `warmup_epochs=2, blend_epochs=2`: epochs 2→`1/3 AP`, 3→`2/3 AP`, 4+→
 ### Usage (PyTorch Lightning)
 
 ```python
-from ap_loss import SmoothAPLoss
-from warmup_wrapper import LossWarmupWrapper
+from proxy_losses import SmoothAPLoss
+from proxy_losses import LossWarmupWrapper
 
 class MyModel(pl.LightningModule):
     def __init__(self):
@@ -208,13 +208,13 @@ uv sync --extra demo
 
 ```bash
 # Default: 3 warmup + 2 blend epochs, then pure AP
-python toy_demo.py
+python examples/toy_demo.py
 
 # Hard switch for comparison
-python toy_demo.py --blend-epochs 0
+python examples/toy_demo.py --blend-epochs 0
 
 # Easier problem
-python toy_demo.py --pos-rate 0.05
+python examples/toy_demo.py --pos-rate 0.05
 ```
 
 Key flags: `--pos-rate`, `--warmup-epochs`, `--blend-epochs`, `--total-epochs`, `--batch-size`, `--queue-size`, `--temp-start`, `--temp-end`, `--lr`, `--seed`.
@@ -222,7 +222,7 @@ Key flags: `--pos-rate`, `--warmup-epochs`, `--blend-epochs`, `--total-epochs`, 
 ## Tests
 
 ```bash
-pytest test_smooth_ap_loss.py test_recall_at_quantile_loss.py test_warmup_wrapper.py -v
+pytest tests/ -v
 ```
 
 ## References

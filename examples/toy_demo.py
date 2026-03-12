@@ -20,8 +20,8 @@ import torch.nn as nn
 from sklearn.datasets import make_classification
 from sklearn.metrics import average_precision_score
 
-from ap_loss import SmoothAPLoss
-from warmup_wrapper import LossWarmupWrapper
+from proxy_losses import SmoothAPLoss
+from proxy_losses import LossWarmupWrapper
 
 # ── synthetic data ──────────────────────────────────────────────────────────
 

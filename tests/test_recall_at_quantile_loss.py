@@ -22,7 +22,7 @@ import math
 import pytest
 import torch
 
-from recall_loss import RecallAtQuantileLoss
+from proxy_losses.recall_loss import RecallAtQuantileLoss
 
 
 # ---------------------------------------------------------------------------
