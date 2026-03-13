@@ -12,8 +12,11 @@ import pytest
 import torch
 import torch.distributed as dist
 
+import torch.nn as nn
+
 from proxy_losses import RecallAtQuantileLoss, SmoothAPLoss
 from proxy_losses.distributed import all_gather_no_grad, all_gather_with_grad
+from proxy_losses.warmup_wrapper import LossWarmupWrapper
 
 
 # ---------------------------------------------------------------------------
@@ -191,3 +194,51 @@ class TestLossGatherDistributed:
         loss = loss_fn(logits, targets)
         loss.backward()
         assert logits.grad is not None
+
+
+# ---------------------------------------------------------------------------
+# LossWarmupWrapper propagates gather_distributed to main_loss
+# ---------------------------------------------------------------------------
+
+
+class TestWrapperGatherDistributed:
+    def _make_wrapper(self, gather_distributed=None):
+        main = SmoothAPLoss(num_classes=1, queue_size=0)
+        return LossWarmupWrapper(
+            warmup_loss=nn.BCEWithLogitsLoss(),
+            main_loss=main,
+            warmup_epochs=1,
+            temp_start=0.1,
+            temp_end=0.01,
+            temp_decay_steps=100,
+            gather_distributed=gather_distributed,
+        )
+
+    def test_default_none_propagated(self):
+        wrapper = self._make_wrapper()
+        assert wrapper.main_loss.gather_distributed is None
+
+    def test_false_propagated(self):
+        wrapper = self._make_wrapper(gather_distributed=False)
+        assert wrapper.main_loss.gather_distributed is False
+
+    def test_true_propagated(self):
+        wrapper = self._make_wrapper(gather_distributed=True)
+        assert wrapper.main_loss.gather_distributed is True
+
+    def test_no_attr_on_custom_loss_does_not_raise(self):
+        """Wrapper silently skips propagation if main_loss has no gather_distributed."""
+        class CustomLoss(nn.Module):
+            def forward(self, logits, targets):
+                return logits.sum() * 0.0
+
+        wrapper = LossWarmupWrapper(
+            warmup_loss=nn.BCEWithLogitsLoss(),
+            main_loss=CustomLoss(),
+            warmup_epochs=1,
+            temp_start=0.1,
+            temp_end=0.01,
+            temp_decay_steps=100,
+            gather_distributed=False,
+        )
+        assert not hasattr(wrapper.main_loss, "gather_distributed")
