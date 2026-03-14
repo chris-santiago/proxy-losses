@@ -1,5 +1,5 @@
 """
-Distributed utilities for proxy losses.
+Distributed utilities for imbalanced losses.
 
 All-gather helpers that preserve gradient flow through the local rank's slice,
 enabling globally-aware rank estimation in DDP training without breaking

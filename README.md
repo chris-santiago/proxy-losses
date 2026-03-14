@@ -13,7 +13,7 @@
 **Design points:**
 - Circular memory queue stabilizes gradient estimates across small batches — critical at low positive rates (e.g. 0.5%)
 - Compatible with PyTorch Lightning via `on_train_epoch_start` / `on_train_batch_start` hooks
-- `toy_demo.py` demonstrates the full warmup→blend→AP pipeline on a highly imbalanced binary classification task using sklearn's `make_classification
+- `toy_demo.py` demonstrates the full warmup→blend→AP pipeline on a highly imbalanced binary classification task using sklearn's `make_classification`
 
 ## Losses
 
@@ -292,7 +292,7 @@ class MyModel(pl.LightningModule):
 
 ## Distributed Training (DDP)
 
-Both losses work in DDP setups, but rank estimation requires the full global batch — not just the local shard. The `imbalanced_losses.distributed` module provides two all-gather helpers that handle this correctly.
+All losses support DDP via built-in all-gather, but globally-correct computation is especially critical for rank-based losses. The `imbalanced_losses.distributed` module provides two all-gather helpers that handle this correctly.
 
 ### Why this matters
 
