@@ -2,6 +2,8 @@
 
 **proxy-losses** is a PyTorch library of differentiable proxy losses for ranking metrics — intended as drop-in replacements for cross-entropy when the real objective is Average Precision or recall at a specific operating point.
 
+> **Note on naming:** "Proxy loss" here means *surrogate objective* — a differentiable approximation to a metric (AP, recall@q) that is otherwise non-differentiable. This is unrelated to *proxy-based* losses in deep metric learning (e.g. ProxyNCA, Proxy-Anchor), which use learned proxy vectors to represent class distributions.
+
 **What's in it:**
 
 - **`SmoothAPLoss`** — Differentiable approximation of AP (Brown et al., ECCV 2020). Uses sigmoid-based soft rank estimation; O(M²) in pool size. Supports multi-class, binary, and seq2seq settings.
