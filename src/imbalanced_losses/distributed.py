@@ -50,7 +50,7 @@ def all_gather_with_grad(tensor: torch.Tensor) -> torch.Tensor:
     --------
     Typical usage in a DDP training step::
 
-        from proxy_losses.distributed import all_gather_with_grad
+        from imbalanced_losses.distributed import all_gather_with_grad
 
         logits_global  = all_gather_with_grad(logits)          # [world*N, C]
         targets_global = all_gather_no_grad(targets)           # [world*N]

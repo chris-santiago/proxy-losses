@@ -18,7 +18,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
 
-from proxy_losses.distributed import all_gather_no_grad, all_gather_with_grad
+from imbalanced_losses.distributed import all_gather_no_grad, all_gather_with_grad
 
 
 # ---------------------------------------------------------------------------

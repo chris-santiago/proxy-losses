@@ -30,8 +30,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-from proxy_losses.ap_loss import SmoothAPLoss
-from proxy_losses.warmup_wrapper import LossWarmupWrapper
+from imbalanced_losses.ap_loss import SmoothAPLoss
+from imbalanced_losses.warmup_wrapper import LossWarmupWrapper
 
 # ---------------------------------------------------------------------------
 # Helpers / fixtures

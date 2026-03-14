@@ -20,7 +20,7 @@ import math
 import pytest
 import torch
 
-from proxy_losses.ap_loss import SmoothAPLoss
+from imbalanced_losses.ap_loss import SmoothAPLoss
 
 # ---------------------------------------------------------------------------
 # Helpers

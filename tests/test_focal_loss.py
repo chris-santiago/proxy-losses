@@ -23,7 +23,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
-from proxy_losses import SigmoidFocalLoss, SoftmaxFocalLoss
+from imbalanced_losses import SigmoidFocalLoss, SoftmaxFocalLoss
 
 SEED = 42
 

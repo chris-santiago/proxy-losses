@@ -18,7 +18,7 @@ from typing import Literal
 
 import torch
 import torch.nn as nn
-from proxy_losses.distributed import all_gather_no_grad, all_gather_with_grad
+from imbalanced_losses.distributed import all_gather_no_grad, all_gather_with_grad
 
 
 class SmoothAPLoss(nn.Module):

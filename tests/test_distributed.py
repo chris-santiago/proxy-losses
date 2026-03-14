@@ -1,5 +1,5 @@
 """
-Unit tests for proxy_losses.distributed.
+Unit tests for imbalanced_losses.distributed.
 
 These tests cover single-process behaviour (world_size=1) and the guard
 conditions. True multi-process all-gather is not tested here — that requires
@@ -14,9 +14,9 @@ import torch.distributed as dist
 
 import torch.nn as nn
 
-from proxy_losses import RecallAtQuantileLoss, SmoothAPLoss
-from proxy_losses.distributed import all_gather_no_grad, all_gather_with_grad
-from proxy_losses.warmup_wrapper import LossWarmupWrapper
+from imbalanced_losses import RecallAtQuantileLoss, SmoothAPLoss
+from imbalanced_losses.distributed import all_gather_no_grad, all_gather_with_grad
+from imbalanced_losses.warmup_wrapper import LossWarmupWrapper
 
 
 # ---------------------------------------------------------------------------
