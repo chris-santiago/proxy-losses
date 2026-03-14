@@ -55,6 +55,13 @@ class LossWarmupWrapper(nn.Module):
        After ``temp_decay_steps`` steps the temperature is held at
        ``temp_end``.
 
+    3. **Linear gamma schedule** (optional) — when ``gamma_start`` and
+       ``gamma_end`` are provided, ``main_loss.gamma`` is linearly
+       interpolated from ``gamma_start`` to ``gamma_end`` over the same
+       ``temp_decay_steps`` steps, coupled to the temperature schedule.
+       Useful with :class:`FocalSmoothAPLoss` to ramp up focal difficulty
+       weighting as easy examples become easy.
+
     Call :meth:`on_train_epoch_start` and :meth:`on_train_batch_start`
     from the corresponding PyTorch Lightning hooks (or your training loop).
 
@@ -88,6 +95,14 @@ class LossWarmupWrapper(nn.Module):
         exists.  ``None`` (default) auto-detects DDP at first forward;
         ``False`` explicitly disables gathering.  No-op if ``main_loss``
         does not have a ``gather_distributed`` attribute.  Default: None.
+    gamma_start : float or None, optional
+        Starting value for ``main_loss.gamma`` at the beginning of the
+        main phase.  ``None`` (default) disables gamma scheduling.
+        Requires ``gamma_end`` to also be set.
+    gamma_end : float or None, optional
+        Final value for ``main_loss.gamma`` after ``temp_decay_steps``
+        steps.  ``None`` (default) disables gamma scheduling.
+        Requires ``gamma_start`` to also be set.
     """
 
     def __init__(
@@ -102,6 +117,8 @@ class LossWarmupWrapper(nn.Module):
         blend_epochs: int = 0,
         reset_queue_each_epoch: bool = False,
         gather_distributed: bool | None = None,
+        gamma_start: float | None = None,
+        gamma_end: float | None = None,
     ) -> None:
         super().__init__()
 
@@ -130,6 +147,7 @@ class LossWarmupWrapper(nn.Module):
 
         self._has_temperature: bool = hasattr(main_loss, "temperature")
         self._has_reset_queue: bool = hasattr(main_loss, "reset_queue")
+        self._has_gamma: bool = hasattr(main_loss, "gamma")
 
         if not self._has_temperature:
             warnings.warn(
@@ -146,12 +164,30 @@ class LossWarmupWrapper(nn.Module):
                 stacklevel=2,
             )
 
+        _gamma_scheduling = gamma_start is not None or gamma_end is not None
+        if _gamma_scheduling and (gamma_start is None or gamma_end is None):
+            raise ValueError(
+                "gamma_start and gamma_end must both be set or both be None"
+            )
+        if _gamma_scheduling and not self._has_gamma:
+            warnings.warn(
+                f"{type(main_loss).__name__} has no 'gamma' attribute; "
+                "gamma scheduling will be skipped.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        self.gamma_start: float | None = float(gamma_start) if gamma_start is not None else None
+        self.gamma_end: float | None = float(gamma_end) if gamma_end is not None else None
+
         self._epoch: int = 0
         self._switch_step: int | None = None  # global step when main phase began
 
         if warmup_epochs == 0:
             self._switch_step = 0
             self._apply_temperature(self.temp_start)
+            if self.gamma_start is not None:
+                self._apply_gamma(self.gamma_start)
 
     # ── properties ──────────────────────────────────────────────────────────
 
@@ -186,6 +222,21 @@ class LossWarmupWrapper(nn.Module):
             loss is active.
         """
         return self._epoch < self.warmup_epochs
+
+    @property
+    def current_gamma(self) -> float | None:
+        """
+        The gamma currently set on ``main_loss``.
+
+        Returns
+        -------
+        float or None
+            ``float(main_loss.gamma)`` if gamma scheduling is active and
+            ``main_loss`` has a ``gamma`` attribute, ``None`` otherwise.
+        """
+        if not self._has_gamma or self.gamma_start is None:
+            return None
+        return float(self.main_loss.gamma)  # type: ignore[union-attr]
 
     @property
     def current_temperature(self) -> float | None:
@@ -263,6 +314,8 @@ class LossWarmupWrapper(nn.Module):
         if self._switch_step == -1:
             self._switch_step = global_step
             self._apply_temperature(self.temp_start)
+            if self.gamma_start is not None:
+                self._apply_gamma(self.gamma_start)
             if self._has_reset_queue:
                 self.main_loss.reset_queue()  # type: ignore[union-attr]
             return
@@ -273,6 +326,9 @@ class LossWarmupWrapper(nn.Module):
             frac * math.log(self.temp_end / self.temp_start)
         )
         self._apply_temperature(temp)
+        if self.gamma_start is not None and self.gamma_end is not None:
+            gamma = self.gamma_start + frac * (self.gamma_end - self.gamma_start)
+            self._apply_gamma(gamma)
 
     # ─�� helpers ─────────────────────────────────────────────────────────────
 
@@ -292,6 +348,23 @@ class LossWarmupWrapper(nn.Module):
         """
         if self._has_temperature:
             self.main_loss.temperature = temp  # type: ignore[union-attr]
+
+    def _apply_gamma(self, gamma: float) -> None:
+        """
+        Write a gamma value to ``main_loss.gamma``.
+
+        Parameters
+        ----------
+        gamma : float
+            Focal exponent to assign.
+
+        Notes
+        -----
+        No-op if ``main_loss`` has no ``gamma`` attribute
+        (``_has_gamma`` is False).
+        """
+        if self._has_gamma:
+            self.main_loss.gamma = gamma  # type: ignore[union-attr]
 
     # ── forward ─────────────────────────────────────────────────────────────
 

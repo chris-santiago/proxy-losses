@@ -31,6 +31,7 @@ import torch
 import torch.nn as nn
 
 from imbalanced_losses.ap_loss import SmoothAPLoss
+from imbalanced_losses.focal_ap_loss import FocalSmoothAPLoss
 from imbalanced_losses.warmup_wrapper import LossWarmupWrapper
 
 # ---------------------------------------------------------------------------
@@ -741,3 +742,146 @@ class TestForwardBlend:
                 targets = torch.randint(0, self.C, (self.B,))
                 loss = wrapper(logits, targets)
                 loss.backward()
+
+
+# ---------------------------------------------------------------------------
+# Gamma scheduling
+# ---------------------------------------------------------------------------
+
+
+class TestGammaScheduling:
+    """Tests for the gamma_start / gamma_end scheduling feature."""
+
+    def _focal_wrapper(
+        self,
+        gamma_start: float = 0.0,
+        gamma_end: float = 2.0,
+        warmup_epochs: int = 1,
+        temp_decay_steps: int = 10,
+    ) -> tuple[LossWarmupWrapper, FocalSmoothAPLoss]:
+        main = FocalSmoothAPLoss(num_classes=2, queue_size=0, gamma=0.0)
+        wrapper = LossWarmupWrapper(
+            warmup_loss=nn.CrossEntropyLoss(),
+            main_loss=main,
+            warmup_epochs=warmup_epochs,
+            temp_start=0.5,
+            temp_end=0.01,
+            temp_decay_steps=temp_decay_steps,
+            gamma_start=gamma_start,
+            gamma_end=gamma_end,
+        )
+        return wrapper, main
+
+    def test_gamma_set_at_latch(self):
+        wrapper, main = self._focal_wrapper(gamma_start=0.5, gamma_end=2.0)
+        wrapper.on_train_epoch_start(1)
+        wrapper.on_train_batch_start(0)
+        assert abs(main.gamma - 0.5) < 1e-6
+
+    def test_gamma_reaches_end(self):
+        wrapper, main = self._focal_wrapper(gamma_start=0.0, gamma_end=2.0, temp_decay_steps=10)
+        wrapper.on_train_epoch_start(1)
+        wrapper.on_train_batch_start(0)   # latch at step 0
+        wrapper.on_train_batch_start(10)  # 10 steps elapsed → frac=1.0
+        assert abs(main.gamma - 2.0) < 1e-6
+
+    def test_gamma_linear_midpoint(self):
+        wrapper, main = self._focal_wrapper(gamma_start=0.0, gamma_end=2.0, temp_decay_steps=10)
+        wrapper.on_train_epoch_start(1)
+        wrapper.on_train_batch_start(0)
+        wrapper.on_train_batch_start(5)  # frac=0.5 → gamma=1.0
+        assert abs(main.gamma - 1.0) < 1e-6
+
+    def test_gamma_clamped_past_decay_steps(self):
+        wrapper, main = self._focal_wrapper(gamma_start=0.0, gamma_end=2.0, temp_decay_steps=10)
+        wrapper.on_train_epoch_start(1)
+        wrapper.on_train_batch_start(0)
+        wrapper.on_train_batch_start(100)  # far past decay_steps
+        assert abs(main.gamma - 2.0) < 1e-6
+
+    def test_gamma_no_op_during_warmup(self):
+        wrapper, main = self._focal_wrapper(gamma_start=1.0, gamma_end=3.0)
+        initial = main.gamma
+        wrapper.on_train_epoch_start(0)  # warmup phase
+        wrapper.on_train_batch_start(5)  # should be a no-op
+        assert main.gamma == initial
+
+    def test_no_gamma_params_backward_compatible(self):
+        """Existing SmoothAPLoss usage must not be affected."""
+        main = SmoothAPLoss(num_classes=4, queue_size=0)
+        wrapper = LossWarmupWrapper(
+            warmup_loss=nn.CrossEntropyLoss(),
+            main_loss=main,
+            warmup_epochs=1,
+            temp_start=0.1,
+            temp_end=0.01,
+            temp_decay_steps=10,
+        )
+        wrapper.on_train_epoch_start(1)
+        wrapper.on_train_batch_start(0)
+        wrapper.on_train_batch_start(5)
+        # No exception, no gamma attr modified
+        assert not hasattr(main, "gamma")
+
+    def test_current_gamma_none_without_scheduling(self):
+        main = FocalSmoothAPLoss(num_classes=2, queue_size=0)
+        wrapper = LossWarmupWrapper(
+            warmup_loss=nn.CrossEntropyLoss(),
+            main_loss=main,
+            warmup_epochs=1,
+            temp_start=0.1,
+            temp_end=0.01,
+            temp_decay_steps=10,
+        )
+        assert wrapper.current_gamma is None
+
+    def test_current_gamma_tracks_value(self):
+        wrapper, main = self._focal_wrapper(gamma_start=0.0, gamma_end=2.0, temp_decay_steps=10)
+        wrapper.on_train_epoch_start(1)
+        wrapper.on_train_batch_start(0)
+        wrapper.on_train_batch_start(5)
+        assert abs(wrapper.current_gamma - 1.0) < 1e-6
+
+    def test_warmup_epochs_zero_sets_gamma_immediately(self):
+        main = FocalSmoothAPLoss(num_classes=2, queue_size=0, gamma=5.0)
+        LossWarmupWrapper(
+            warmup_loss=nn.CrossEntropyLoss(),
+            main_loss=main,
+            warmup_epochs=0,
+            temp_start=0.5,
+            temp_end=0.01,
+            temp_decay_steps=10,
+            gamma_start=0.0,
+            gamma_end=2.0,
+        )
+        assert abs(main.gamma - 0.0) < 1e-6
+
+    def test_both_gamma_params_required(self):
+        main = FocalSmoothAPLoss(num_classes=2, queue_size=0)
+        with pytest.raises(ValueError, match="gamma"):
+            LossWarmupWrapper(
+                warmup_loss=nn.CrossEntropyLoss(),
+                main_loss=main,
+                warmup_epochs=1,
+                temp_start=0.5,
+                temp_end=0.01,
+                temp_decay_steps=10,
+                gamma_start=0.0,
+                # gamma_end missing
+            )
+
+    def test_warning_when_no_gamma_attr(self):
+        main = nn.Linear(4, 2)  # no gamma attribute
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            LossWarmupWrapper(
+                warmup_loss=nn.CrossEntropyLoss(),
+                main_loss=main,
+                warmup_epochs=1,
+                temp_start=0.5,
+                temp_end=0.01,
+                temp_decay_steps=10,
+                gamma_start=0.0,
+                gamma_end=2.0,
+            )
+        assert any("gamma" in str(x.message) for x in w)
