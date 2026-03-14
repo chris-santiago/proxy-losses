@@ -8,7 +8,8 @@
 - **`SoftmaxFocalLoss`** — Multiclass focal loss with softmax. Supports `mean_positive` reduction (RetinaNet convention: normalize by positive count), per-class `alpha` weighting, label smoothing, and arbitrary spatial/sequence input shapes.
 - **`SmoothAPLoss`** — Differentiable approximation of AP (Brown et al., ECCV 2020). Uses sigmoid-based soft rank estimation; O(M²) in pool size. Supports multi-class, binary, and seq2seq settings.
 - **`RecallAtQuantileLoss`** — Optimizes recall above a score threshold set at the *q*-th quantile of the pooled distribution. Useful for alert/detection workloads (e.g. top 0.5% of scores).
-- **`LossWarmupWrapper`** — Training utility that runs a standard loss (BCE/CE) during warmup, linearly blends into the ranking loss over a configurable transition window, then applies geometric temperature decay. Automatically resets the memory queue at the phase switch to prevent queue poisoning from warmup-era logits.
+- **`FocalSmoothAPLoss`** — Focal-modulated Smooth-AP. Weights each positive's AP contribution by its rank-based difficulty `(1 − p_rank)^γ`, suppressing gradient from positives that already rank above most negatives and focusing it on the ones that don't. Optionally up-weights severe pairwise violations in the rank denominator (`alpha`, `beta`). **Gamma must be scheduled** (start at 0, ramp up) to avoid degenerate solutions — see below.
+- **`LossWarmupWrapper`** — Training utility that runs a standard loss (BCE/CE) during warmup, linearly blends into the ranking loss over a configurable transition window, then applies geometric temperature decay and optional linear gamma scheduling. Automatically resets the memory queue at the phase switch to prevent queue poisoning from warmup-era logits.
 
 **Design points:**
 - Circular memory queue stabilizes gradient estimates across small batches — critical at low positive rates (e.g. 0.5%)
@@ -74,6 +75,105 @@ loss = 1 − AP
 ```
 
 **Complexity:** O(M²) in memory and compute where M = batch + queue size. Keep M ≤ ~4096.
+
+### `FocalSmoothAPLoss` — Focal-Modulated Smooth-AP
+
+Extends `SmoothAPLoss` with rank-based focal weighting applied *inside* the AP computation. For each positive *k* in the pool, its AP contribution is weighted by how poorly it currently ranks:
+
+```
+p_rank[k]      = (Σ_{j∈N} (1 − σ((s_j − s_k)/τ))) / |N|
+                 # fraction of negatives ranked below positive k
+focal[k]       = (1 − p_rank[k])^γ
+FocalAP        = (1/|P|) Σ_{k∈P} focal[k] · rank_pos[k] / rank_all[k]
+loss           = 1 − FocalAP
+```
+
+When `γ=0`, all focal weights are 1 and the result is **numerically identical** to `SmoothAPLoss`. The focal weights are always detached (stop-gradient) — gradient flows only through `rank_pos / rank_all`.
+
+An optional violation-weighting term (`alpha`, `beta`) up-weights severe `(positive, negative)` pairs in the rank denominator, increasing gradient pressure on the worst-ranked positives:
+
+```
+w[k,j]        = α · σ((s_j − s_k)/τ)^β    for j ∈ N
+rank_all[k]   = 1 + Σ_{j∈P} soft_gt[k,j] + Σ_{j∈N} w[k,j] · soft_gt[k,j]
+```
+
+`alpha=-1` (default) disables this entirely. Note that `alpha > 1` is required to actually inflate `rank_all` (when `α=1, β=1` the contribution `soft_gt²` is *smaller* than `soft_gt` since `soft_gt ∈ (0,1)`).
+
+```python
+from imbalanced_losses import FocalSmoothAPLoss
+
+# Focal modulation only — gamma must be scheduled, not fixed high
+loss_fn = FocalSmoothAPLoss(num_classes=1, queue_size=4096, temperature=0.01, gamma=0.0)
+
+# With violation weighting
+loss_fn = FocalSmoothAPLoss(num_classes=4, gamma=2.0, alpha=2.0, beta=0.0)
+
+# Binary mode
+logits  = torch.randn(32, 1)
+targets = torch.randint(0, 2, (32,))
+loss = loss_fn(logits, targets)
+loss.backward()
+```
+
+#### Gamma scheduling — required to avoid degenerate solutions
+
+> **Warning:** Using a fixed high `gamma` from the start of training is pathological and should be avoided.
+
+With a sharp temperature (`τ ≤ 0.01`), soft-rank values are nearly binary. As soon as a positive ranks above most negatives — even randomly, early in training — its focal weight becomes `(1 - 1.0)^γ ≈ 0`. It receives no gradient. The loss saturates at ≈ 1 regardless of model quality, providing no useful training signal.
+
+**Always use `gamma_start=0.0` and schedule `gamma` upward** via `LossWarmupWrapper`:
+
+```python
+from imbalanced_losses import FocalSmoothAPLoss, LossWarmupWrapper
+import torch.nn as nn
+
+n_train, batch_size, total_epochs = 45_000, 512, 30
+total_steps = total_epochs * (n_train // batch_size)
+
+loss_fn = LossWarmupWrapper(
+    warmup_loss=nn.BCEWithLogitsLoss(),
+    main_loss=FocalSmoothAPLoss(num_classes=1, queue_size=4096, temperature=0.01),
+    warmup_epochs=0,          # no warmup: AP loss is active from step 0
+    temp_start=0.01,
+    temp_end=0.01,            # hold temperature constant; only gamma changes
+    temp_decay_steps=total_steps,
+    gamma_start=0.0,          # start identical to SmoothAP
+    gamma_end=2.0,            # ramp up as easy positives stabilize
+)
+```
+
+This ensures the model first learns to separate positives from negatives broadly (with `γ≈0`, matching `SmoothAPLoss`), then progressively focuses gradient on hard positives as the easy ones stabilize in the ranked list.
+
+#### When `FocalSmoothAPLoss` is the right tool
+
+The key condition is that **positive difficulty must be a property of the data, not just the current model state.** When all positives are drawn from the same distribution (as in a typical synthetic benchmark), difficulty changes as the model evolves and focal suppression misfires — `SmoothAPLoss` with its implicit rank-based curriculum is sufficient.
+
+`FocalSmoothAPLoss` earns its keep when some positives are *structurally* easy throughout training:
+
+| Setting | Structurally easy positives | Structurally hard positives |
+|---|---|---|
+| Image retrieval with near-duplicates | Same photo, different crop/compression | Semantically similar but visually different |
+| Person re-identification | Same-camera, same-session pairs | Cross-camera, cross-condition pairs |
+| Medical image retrieval | Obvious pathology (large mass, clear finding) | Subtle pathology (early nodule, borderline finding) |
+| Long-tailed multi-label | Common visually-unambiguous classes | Rare classes with high within-class variance |
+| Graded relevance retrieval | Highly-relevant (exact-match) documents | Marginally-relevant (tangentially-related) documents |
+
+In all these cases, the easy positives stay near the top of the ranked list regardless of training — suppressing their gradient is safe because their rank is enforced by data structure, not by gradient maintenance. The capacity freed up is directed toward the hard cases where AP still has room to improve.
+
+Note that the **memory queue is especially important** for `FocalSmoothAPLoss`: per-batch difficulty estimates are noisy because `p_rank[k]` depends on which negatives happen to be in the batch. A large queue (≥ 2048) gives a stable difficulty estimate over thousands of negatives, making focal suppression meaningful rather than random.
+
+#### Parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `num_classes` | required | Number of output classes; use `1` for binary |
+| `queue_size` | `1024` | Circular buffer size; recommend ≥ 2048 for stable focal weights |
+| `temperature` | `0.01` | Sigmoid sharpness τ |
+| `reduction` | `'mean'` | `'mean'`, `'sum'`, or `'none'` |
+| `ignore_index` | `-100` | Target value for padding positions |
+| `gamma` | `2.0` | Focal exponent γ ≥ 0; **always schedule from 0 via `LossWarmupWrapper`** |
+| `alpha` | `-1.0` | Violation weight coefficient; `-1` disables; requires `> 1` to inflate `rank_all` |
+| `beta` | `0.0` | Violation exponent; `0` = uniform up-weighting; `> 0` concentrates on worst violations |
 
 ### `RecallAtQuantileLoss` — Recall at Quantile
 
@@ -278,6 +378,10 @@ class MyModel(pl.LightningModule):
 | `temp_decay_steps` | required | Steps over which to decay temperature |
 | `blend_epochs` | `0` | Epochs to linearly ramp from warmup to main loss; `0` = hard switch |
 | `reset_queue_each_epoch` | `False` | Call `main_loss.reset_queue()` at the start of each main-phase epoch |
+| `gamma_start` | `None` | Starting value for `main_loss.gamma` at phase switch; `None` disables gamma scheduling |
+| `gamma_end` | `None` | Final value for `main_loss.gamma` after `temp_decay_steps` steps; must be set with `gamma_start` |
+
+`gamma_start` and `gamma_end` use the same `frac` counter as temperature (elapsed steps / `temp_decay_steps`) but apply **linear** interpolation. Set `gamma_start=0.0` to begin identical to `SmoothAPLoss` and ramp up as easy positives stabilize.
 
 ### Properties / methods
 
@@ -287,8 +391,9 @@ class MyModel(pl.LightningModule):
 | `in_blend` | `True` during the `blend_epochs` transition period |
 | `ap_weight` | Current AP loss weight: `0.0` during warmup, linear ramp during blend, `1.0` after |
 | `current_temperature` | Current `main_loss.temperature`, or `None` if unavailable |
+| `current_gamma` | Current `main_loss.gamma` if gamma scheduling is active, `None` otherwise |
 | `on_train_epoch_start(epoch)` | Advance epoch counter; detect phase switch; optionally reset queue |
-| `on_train_batch_start(global_step)` | Latch `switch_step` on first main-phase batch; reset queue; update temperature |
+| `on_train_batch_start(global_step)` | Latch `switch_step` on first main-phase batch; reset queue; update temperature and gamma |
 
 ## Distributed Training (DDP)
 
@@ -398,6 +503,28 @@ python examples/compare_demo.py --warmup-epochs 5 --blend-epochs 3
 ```
 
 Key flags (both scripts): `--pos-rate`, `--warmup-epochs`, `--blend-epochs`, `--total-epochs`, `--batch-size`, `--queue-size`, `--temp-start`, `--temp-end`, `--lr`, `--seed`.
+
+### `ranking_demo.py` — four-way AP loss comparison
+
+Trains four models on the same imbalanced data and prints a per-epoch AUCPR table:
+
+| Strategy | Description |
+|---|---|
+| BCE | Vanilla `BCEWithLogitsLoss`; easy negatives dominate |
+| SigmoidFocal | `SigmoidFocalLoss(alpha=0.25, gamma=2)` — down-weights easy examples |
+| SmoothAP | `SmoothAPLoss` — ranking loss with implicit difficulty curriculum |
+| FocalSmoothAP | `FocalSmoothAPLoss` wrapped in `LossWarmupWrapper` with `gamma_start=0 → gamma_end` |
+
+`FocalSmoothAP` starts with `gamma=0` (identical to `SmoothAP`) and linearly ramps up focal suppression over the full training duration, so the comparison is fair — it doesn't gain an unfair head-start by suppressing positives before the model has learned basic ranking.
+
+```bash
+python examples/ranking_demo.py
+python examples/ranking_demo.py --pos-rate 0.02      # less extreme imbalance
+python examples/ranking_demo.py --gamma 4.0          # stronger final focal effect
+python examples/ranking_demo.py --temperature 0.05   # softer ranking
+```
+
+Key flags: `--pos-rate`, `--queue-size`, `--temperature`, `--focal-alpha`, `--focal-gamma`, `--gamma` (final focal exponent for FocalSmoothAP; scheduled 0 → this value), `--total-epochs`, `--batch-size`, `--lr`, `--seed`.
 
 ## Tests
 
