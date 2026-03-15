@@ -66,7 +66,7 @@ model     = nn.Sequential(nn.Linear(20, 64), nn.ReLU(), nn.Linear(64, 1))
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 loss_fn   = nn.BCEWithLogitsLoss()
 
-for epoch in range(20):
+for epoch in range(25):
     model.train()
     optimizer.zero_grad()
     loss = loss_fn(model(X_train), y_train)
@@ -99,7 +99,7 @@ model     = nn.Sequential(nn.Linear(20, 64), nn.ReLU(), nn.Linear(64, 1))
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 loss_fn   = SigmoidFocalLoss(alpha=0.25, gamma=2.0, reduction="mean")
 
-for epoch in range(20):
+for epoch in range(25):
     model.train()
     optimizer.zero_grad()
     loss = loss_fn(model(X_train), y_train)
@@ -201,8 +201,8 @@ You trained the same model architecture with three different loss strategies and
 
 | Loss strategy | AUCPR |
 |---|---|
-| Vanilla BCE | 0.18 |
-| Focal Loss | 0.19 |
+| Vanilla BCE | 0.20 |
+| Focal Loss | 0.21 |
 | Smooth-AP with warmup | 0.42 |
 
 ## Next steps
