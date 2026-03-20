@@ -104,3 +104,45 @@ loss = loss_fn(logits, targets)
 ```
 
 **Confirm:** `loss` is a scalar.
+
+---
+
+## When to prefer weighted cross-entropy over focal loss
+
+Focal loss was introduced to address class imbalance by down-weighting easy, well-classified examples so training focuses on hard ones. The loss for sample $i$ is:
+
+$$\mathcal{L}_{\text{focal}} = -\alpha_t (1 - p_t)^\gamma \log p_t$$
+
+where $p_t$ is the model's predicted probability for the true class, $\alpha_t$ is a class-balance weight, and $\gamma \geq 0$ is the focusing exponent. At $\gamma = 0$ this reduces to standard weighted cross-entropy.
+
+The focusing term $(1 - p_t)^\gamma$ downweights examples the model classifies confidently and upweights examples it finds difficult. This is most beneficial when easy examples are numerous enough to dominate the gradient — the regime for which focal loss was designed (e.g. RetinaNet, where ~34% of anchors are positive after filtering). **At extreme positive rates (≪ 1%), this mechanism can backfire.**
+
+### Why the focusing term hurts at very low positive rates
+
+**1. It suppresses gradient from confident positives.**
+
+When a positive is well-classified ($p_t$ high), the base gradient is already small. Focal loss suppresses it further by $(1 - p_t)^\gamma$: at $p_t = 0.9$ and $\gamma = 2$, the focal contribution is roughly 1% of the weighted cross-entropy contribution. When per-batch positive counts are in the single digits, every positive gradient signal is statistically meaningful regardless of confidence. Discarding the contribution of well-classified positives is a cost that scales inversely with positive count.
+
+**2. The focusing acts almost entirely on negatives.**
+
+When positives are rare, the hard examples that $\gamma$ upweights are predominantly hard negatives — samples near the decision boundary where the model is uncertain. Whether these are the most informative examples is domain-dependent; in many cases they represent label noise or genuine ambiguity. Either way, the intended purpose of focal loss — amplifying signal from hard *positives* — is structurally undermined when nearly all hard examples are negative by construction.
+
+### Alpha does the real work
+
+In highly imbalanced settings, the $\alpha_t$ term is the primary mechanism correcting for imbalance. It directly rescales the loss contribution of each class by inverse frequency, unconditionally and independently of model confidence. Focal loss adds $\gamma$ on top, but at extreme imbalance the marginal benefit diminishes and the cost — suppressed gradient from an already-scarce positive class — is concrete.
+
+### A practical qualification
+
+This analysis assumes random or globally-stratified sampling, where per-batch positive counts reflect the population rate. When batches are constructed with controlled per-class quotas (e.g. oversampling), the effective within-batch positive rate can be substantially higher than the population rate. With many positives per batch, easy positives are more plausibly redundant and the focusing term recovers its intended function. Evaluate $\gamma$ against **actual per-batch positive counts**, not the population rate alone.
+
+### Rule of thumb
+
+Treat $\gamma$ as a continuous hyperparameter whose optimal value approaches zero as per-batch positive counts fall. At very low positive counts, well-tuned alpha weighting alone is likely sufficient, and $\gamma > 0$ should be motivated empirically rather than assumed to help.
+
+```python
+# At extreme imbalance: start here and increase gamma only if it helps empirically
+pos_rate = 0.0015
+alpha    = [1.0, 1.0 / pos_rate]    # [negative_weight, positive_weight]
+
+loss_fn = SoftmaxFocalLoss(alpha=alpha, gamma=0.0)   # equivalent to weighted CE
+```
