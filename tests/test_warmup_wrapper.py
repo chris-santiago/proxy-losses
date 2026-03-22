@@ -601,7 +601,7 @@ class TestBlendEpochs:
         w = _make_wrapper(warmup_epochs=2, blend_epochs=0)
         w.on_train_epoch_start(2)
         assert not w.in_blend
-        assert w.ap_weight == 1.0
+        assert w.main_weight == 1.0
 
     def test_in_blend_true_during_blend_epochs(self):
         w = _make_wrapper(warmup_epochs=1, blend_epochs=2)
@@ -622,31 +622,31 @@ class TestBlendEpochs:
         w.on_train_epoch_start(1)
         assert not w.in_blend
 
-    def test_ap_weight_zero_during_warmup(self):
+    def test_main_weight_zero_during_warmup(self):
         w = _make_wrapper(warmup_epochs=2, blend_epochs=2)
         for epoch in range(2):
             w.on_train_epoch_start(epoch)
-            assert w.ap_weight == 0.0
+            assert w.main_weight == 0.0
 
-    def test_ap_weight_ramp_during_blend(self):
+    def test_main_weight_ramp_during_blend(self):
         w = _make_wrapper(warmup_epochs=1, blend_epochs=3)
         # blend_epoch_index 0,1,2 → weights 1/4, 2/4, 3/4
         w.on_train_epoch_start(1)
-        assert w.ap_weight == pytest.approx(1 / 4)
+        assert w.main_weight == pytest.approx(1 / 4)
         w.on_train_epoch_start(2)
-        assert w.ap_weight == pytest.approx(2 / 4)
+        assert w.main_weight == pytest.approx(2 / 4)
         w.on_train_epoch_start(3)
-        assert w.ap_weight == pytest.approx(3 / 4)
+        assert w.main_weight == pytest.approx(3 / 4)
 
-    def test_ap_weight_one_after_blend(self):
+    def test_main_weight_one_after_blend(self):
         w = _make_wrapper(warmup_epochs=1, blend_epochs=2)
         w.on_train_epoch_start(3)
-        assert w.ap_weight == 1.0
+        assert w.main_weight == 1.0
 
-    def test_ap_weight_one_with_no_blend(self):
+    def test_main_weight_one_with_no_blend(self):
         w = _make_wrapper(warmup_epochs=1, blend_epochs=0)
         w.on_train_epoch_start(1)
-        assert w.ap_weight == 1.0
+        assert w.main_weight == 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -675,12 +675,12 @@ class TestForwardBlend:
             temp_decay_steps=100,
             blend_epochs=3,
         )
-        w.on_train_epoch_start(1)   # blend epoch 0 → ap_weight = 1/4
+        w.on_train_epoch_start(1)   # blend epoch 0 → main_weight = 1/4
         w.on_train_batch_start(10)
         logits, targets = self._batch()
         with torch.no_grad():
             blended = w(logits, targets)
-            wt = w.ap_weight
+            wt = w.main_weight
             expected = (1 - wt) * warmup(logits, targets) + wt * main(logits, targets)
         assert blended == pytest.approx(expected.item(), rel=1e-5)
 
@@ -922,31 +922,31 @@ class TestStepModeBlend:
             w.on_train_batch_start(step)
             assert not w.in_blend
 
-    def test_ap_weight_zero_during_warmup(self):
+    def test_main_weight_zero_during_warmup(self):
         w = _make_step_wrapper(warmup_steps=5, blend_steps=5)
         for step in range(5):
             w.on_train_batch_start(step)
-            assert w.ap_weight == 0.0
+            assert w.main_weight == 0.0
 
-    def test_ap_weight_ramp_during_blend(self):
+    def test_main_weight_ramp_during_blend(self):
         w = _make_step_wrapper(warmup_steps=0, blend_steps=3)
         # blend_step_index 0,1,2 → weights 1/4, 2/4, 3/4
         w.on_train_batch_start(0)
-        assert w.ap_weight == pytest.approx(1 / 4)
+        assert w.main_weight == pytest.approx(1 / 4)
         w.on_train_batch_start(1)
-        assert w.ap_weight == pytest.approx(2 / 4)
+        assert w.main_weight == pytest.approx(2 / 4)
         w.on_train_batch_start(2)
-        assert w.ap_weight == pytest.approx(3 / 4)
+        assert w.main_weight == pytest.approx(3 / 4)
 
-    def test_ap_weight_one_after_blend(self):
+    def test_main_weight_one_after_blend(self):
         w = _make_step_wrapper(warmup_steps=0, blend_steps=3)
         w.on_train_batch_start(3)
-        assert w.ap_weight == 1.0
+        assert w.main_weight == 1.0
 
-    def test_ap_weight_one_with_no_blend_steps(self):
+    def test_main_weight_one_with_no_blend_steps(self):
         w = _make_step_wrapper(warmup_steps=2, blend_steps=0)
         w.on_train_batch_start(2)
-        assert w.ap_weight == 1.0
+        assert w.main_weight == 1.0
 
 
 class TestStepModeForward:
@@ -1009,11 +1009,11 @@ class TestStepModeForward:
             temp_end=0.01,
             temp_decay_steps=100,
         )
-        w.on_train_batch_start(1)  # blend step 1 → ap_weight = 2/4 = 0.5
+        w.on_train_batch_start(1)  # blend step 1 → main_weight = 2/4 = 0.5
         logits, targets = self._batch()
         with torch.no_grad():
             blended = w(logits, targets)
-            wt = w.ap_weight
+            wt = w.main_weight
             expected = (1 - wt) * warmup(logits, targets) + wt * main(logits, targets)
         assert blended == pytest.approx(expected.item(), rel=1e-5)
 

@@ -59,7 +59,7 @@ class MyModel(pl.LightningModule):
         logits, targets = batch
         loss = self.loss_fn(logits, targets)
         self.log("train/loss", loss)
-        self.log("train/ap_weight", self.loss_fn.ap_weight)
+        self.log("train/main_weight", self.loss_fn.main_weight)
         if (t := self.loss_fn.current_temperature) is not None:
             self.log("train/temperature", t)
         return loss
@@ -81,7 +81,7 @@ class MyModel(pl.LightningModule):
 
 **Epoch mode** — with `warmup_epochs=5, blend_epochs=2`:
 
-| Epoch range | Phase | `in_warmup` | `in_blend` | `ap_weight` |
+| Epoch range | Phase | `in_warmup` | `in_blend` | `main_weight` |
 |---|---|---|---|---|
 | 0–4 | warmup | `True` | `False` | `0.0` |
 | 5 | blend | `False` | `True` | `0.333` |
@@ -90,7 +90,7 @@ class MyModel(pl.LightningModule):
 
 **Step mode** — with `warmup_steps=500, blend_steps=3`:
 
-| Step range | Phase | `in_warmup` | `in_blend` | `ap_weight` |
+| Step range | Phase | `in_warmup` | `in_blend` | `main_weight` |
 |---|---|---|---|---|
 | 0–499 | warmup | `True` | `False` | `0.0` |
 | 500 | blend | `False` | `True` | `0.25` |
@@ -130,5 +130,5 @@ The clock starts at the first main-phase batch, not at training epoch 0.
 |---|---|---|
 | `in_warmup` | `bool` | `True` while in the warmup phase |
 | `in_blend` | `bool` | `True` during the blend transition |
-| `ap_weight` | `float` | Current AP weight: `0.0` → ramp → `1.0` |
+| `main_weight` | `float` | Current main loss weight: `0.0` → ramp → `1.0` |
 | `current_temperature` | `float or None` | Current `main_loss.temperature`; `None` if unavailable |

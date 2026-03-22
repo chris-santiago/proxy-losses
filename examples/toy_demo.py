@@ -190,7 +190,7 @@ def train(
             phase = "AP"
 
         print(
-            f"{epoch:5d}  {phase:>10}  {loss_fn.ap_weight:5.2f}  "
+            f"{epoch:5d}  {phase:>10}  {loss_fn.main_weight:5.2f}  "
             f"{temp:8.5f}  {avg_loss:8.4f}  {aucpr:7.4f}"
         )
 

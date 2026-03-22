@@ -103,8 +103,8 @@ class LossWarmupWrapper(nn.Module):
     blend_epochs : int, optional
         Number of epochs after warmup to linearly blend from ``warmup_loss``
         to ``main_loss``.  During blend epoch ``k`` (0-indexed),
-        ``ap_weight = (k + 1) / (blend_epochs + 1)``.  After the blend
-        period, ``ap_weight = 1.0`` (pure ``main_loss``).  Mutually
+        ``main_weight = (k + 1) / (blend_epochs + 1)``.  After the blend
+        period, ``main_weight = 1.0`` (pure ``main_loss``).  Mutually
         exclusive with ``blend_steps``.  Default: 0 (hard switch).
     warmup_steps : int or None, optional
         Number of global training steps to use ``warmup_loss``.  Mutually
@@ -115,7 +115,7 @@ class LossWarmupWrapper(nn.Module):
     blend_steps : int or None, optional
         Number of global training steps after warmup to linearly blend from
         ``warmup_loss`` to ``main_loss``.  During blend step ``k``
-        (0-indexed), ``ap_weight = (k + 1) / (blend_steps + 1)``.  Mutually
+        (0-indexed), ``main_weight = (k + 1) / (blend_steps + 1)``.  Mutually
         exclusive with ``blend_epochs > 0``.  Default: None.
     reset_queue_each_epoch : bool, optional
         Call ``main_loss.reset_queue()`` at the start of each epoch in
@@ -230,8 +230,8 @@ class LossWarmupWrapper(nn.Module):
         return self.blend_epochs > 0 and self._epoch < self.warmup_epochs + self.blend_epochs
 
     @property
-    def ap_weight(self) -> float:
-        """Current AP loss weight (0.0 during warmup, ramp during blend, 1.0 after)."""
+    def main_weight(self) -> float:
+        """Current main loss weight (0.0 during warmup, ramp during blend, 1.0 after)."""
         if self.in_warmup:
             return 0.0
         if self._step_mode:
@@ -402,12 +402,12 @@ class LossWarmupWrapper(nn.Module):
             During warmup or blend: scalar tensor.  After blend: output of
             ``main_loss`` (scalar or tuple when ``return_per_class=True``).
             ``**kwargs`` are forwarded to ``main_loss`` only when
-            ``ap_weight == 1.0``; they are silently ignored during warmup
+            ``main_weight == 1.0``; they are silently ignored during warmup
             and blend phases.
         """
         if self.in_warmup:
             return self.warmup_loss(logits, targets)
-        w = self.ap_weight
+        w = self.main_weight
         if w >= 1.0:
             return self.main_loss(logits, targets, **kwargs)
         return (1 - w) * self.warmup_loss(logits, targets) + w * self.main_loss(logits, targets)

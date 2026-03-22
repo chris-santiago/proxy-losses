@@ -108,7 +108,7 @@ loss_fn = LossWarmupWrapper(
 )
 ```
 
-| Epoch | Phase | `ap_weight` |
+| Epoch | Phase | `main_weight` |
 |---|---|---|
 | 0–4 | warmup | 0.0 |
 | 5 | blend | 0.25 |
@@ -126,7 +126,7 @@ loss_fn = LossWarmupWrapper(
 )
 ```
 
-`ap_weight` follows the same `(k + 1) / (blend_steps + 1)` formula per step.
+`main_weight` follows the same `(k + 1) / (blend_steps + 1)` formula per step.
 
 ## Tune temperature decay
 
