@@ -97,3 +97,7 @@ tmp/
 temp/
 .claude/
 .ropeproject/
+*csv
+CLAUDE.md
+site/
+scratch.py

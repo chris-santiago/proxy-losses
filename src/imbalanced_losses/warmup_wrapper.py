@@ -1,8 +1,8 @@
 """
 LossWarmupWrapper — phase-switching loss with geometric temperature decay.
 
-Usage in a LightningModule
----------------------------
+Usage in a LightningModule (epoch-based warmup)
+------------------------------------------------
     class MyModel(pl.LightningModule):
         def __init__(self):
             super().__init__()
@@ -29,6 +29,27 @@ Usage in a LightningModule
             if (t := self.loss_fn.current_temperature) is not None:
                 self.log("train/temperature", t)
             return loss
+
+Usage in a LightningModule (step-based warmup)
+-----------------------------------------------
+    class MyModel(pl.LightningModule):
+        def __init__(self):
+            super().__init__()
+            self.loss_fn = LossWarmupWrapper(
+                warmup_loss=nn.CrossEntropyLoss(),
+                main_loss=SmoothAPLoss(num_classes=10, queue_size=1024),
+                warmup_steps=1_000,
+                blend_steps=500,
+                temp_start=0.05,
+                temp_end=0.005,
+                temp_decay_steps=10_000,
+            )
+
+        # on_train_epoch_start is optional in step mode (only needed for
+        # reset_queue_each_epoch).
+
+        def on_train_batch_start(self, batch, batch_idx):
+            self.loss_fn.on_train_batch_start(self.global_step)
 """
 
 from __future__ import annotations
@@ -43,8 +64,10 @@ class LossWarmupWrapper(nn.Module):
     """
     Wraps a warmup loss and a main ranking loss with two features:
 
-    1. **Phase switching** — ``warmup_loss`` is active for epochs
-       ``< warmup_epochs``; ``main_loss`` is active thereafter.
+    1. **Phase switching** — ``warmup_loss`` is active during the warmup
+       phase; ``main_loss`` is active thereafter.  The warmup phase can be
+       defined in **epochs** (``warmup_epochs``) or **steps**
+       (``warmup_steps``), but not both.
 
     2. **Geometric temperature decay** — ``main_loss.temperature`` decays
        from ``temp_start`` to ``temp_end`` over ``temp_decay_steps``
@@ -64,6 +87,8 @@ class LossWarmupWrapper(nn.Module):
 
     Call :meth:`on_train_epoch_start` and :meth:`on_train_batch_start`
     from the corresponding PyTorch Lightning hooks (or your training loop).
+    In step mode, :meth:`on_train_epoch_start` is optional (only needed
+    when ``reset_queue_each_epoch=True``).
 
     Parameters
     ----------
@@ -73,8 +98,9 @@ class LossWarmupWrapper(nn.Module):
     main_loss : nn.Module
         Loss used after warmup.  Must accept ``(logits, targets, **kwargs)``.
         Typical choice: ``SmoothAPLoss``, ``RecallAtQuantileLoss``.
-    warmup_epochs : int
+    warmup_epochs : int, optional
         Number of epochs to use ``warmup_loss`` (0 = skip warmup entirely).
+        Mutually exclusive with ``warmup_steps``.  Default: 0.
     temp_start : float
         Temperature at the start of the main phase.
     temp_end : float
@@ -84,9 +110,33 @@ class LossWarmupWrapper(nn.Module):
     blend_epochs : int, optional
         Number of epochs after warmup to linearly blend from ``warmup_loss``
         to ``main_loss``.  During blend epoch ``k`` (0-indexed),
-        ``ap_weight = (k + 1) / (blend_epochs + 1)``.  After the blend
-        period, ``ap_weight = 1.0`` (pure ``main_loss``).  Default: 0
-        (hard switch, backward-compatible).
+        ``main_weight`` ramps from 0 to ``final_main_weight``.  After the
+        blend period, ``main_weight = final_main_weight``.  Mutually
+        exclusive with ``blend_steps``.  Default: 0 (hard switch).
+    warmup_steps : int or None, optional
+        Number of global training steps to use ``warmup_loss``.  Mutually
+        exclusive with ``warmup_epochs > 0``.  When specified, phase
+        transitions are driven by the step counter passed to
+        :meth:`on_train_batch_start` rather than by epoch hooks.
+        Default: None (epoch mode).
+    blend_steps : int or None, optional
+        Number of global training steps after warmup to linearly blend from
+        ``warmup_loss`` to ``main_loss``.  During blend step ``k``
+        (0-indexed), ``main_weight`` ramps from 0 to ``final_main_weight``.
+        Mutually exclusive with ``blend_epochs > 0``.  Default: None.
+    final_main_weight : float, optional
+        The ``main_loss`` weight to hold after the blend period (or at the
+        hard switch if no blend is configured).  Must be in ``(0, 1]``.
+        Default: ``1.0`` (pure ``main_loss`` after warmup).
+
+        Use this when you want a permanent mix — e.g.
+        ``final_main_weight=0.75`` keeps a 75 / 25 main / warmup split
+        indefinitely after the blend ramp completes.
+
+        .. note::
+            When ``final_main_weight < 1.0``, ``**kwargs`` are never
+            forwarded to ``main_loss`` (the blended path does not support
+            them).
     reset_queue_each_epoch : bool, optional
         Call ``main_loss.reset_queue()`` at the start of each epoch in
         the main phase (if the method exists).  Default: False.
@@ -109,12 +159,15 @@ class LossWarmupWrapper(nn.Module):
         self,
         warmup_loss: nn.Module,
         main_loss: nn.Module,
-        warmup_epochs: int,
-        temp_start: float,
-        temp_end: float,
-        temp_decay_steps: int,
+        warmup_epochs: int = 0,
+        temp_start: float = 0.05,
+        temp_end: float = 0.005,
+        temp_decay_steps: int = 10_000,
         *,
         blend_epochs: int = 0,
+        warmup_steps: int | None = None,
+        blend_steps: int | None = None,
+        final_main_weight: float = 1.0,
         reset_queue_each_epoch: bool = False,
         gather_distributed: bool | None = None,
         gamma_start: float | None = None,
@@ -122,16 +175,40 @@ class LossWarmupWrapper(nn.Module):
     ) -> None:
         super().__init__()
 
+        # ── Validation ───────────────────────────────────────────────────────
+        if warmup_steps is not None and warmup_epochs != 0:
+            raise ValueError(
+                "Cannot specify both warmup_epochs (non-zero) and warmup_steps; "
+                "use one or the other."
+            )
+        if blend_steps is not None and blend_epochs != 0:
+            raise ValueError(
+                "Cannot specify both blend_epochs (non-zero) and blend_steps; "
+                "use one or the other."
+            )
+        if blend_steps is not None and warmup_steps is None:
+            raise ValueError(
+                "blend_steps requires warmup_steps (step mode); "
+                "use blend_epochs with warmup_epochs instead."
+            )
         if warmup_epochs < 0:
             raise ValueError(f"warmup_epochs must be >= 0, got {warmup_epochs}")
+        if warmup_steps is not None and warmup_steps < 0:
+            raise ValueError(f"warmup_steps must be >= 0, got {warmup_steps}")
+        if blend_epochs < 0:
+            raise ValueError(f"blend_epochs must be >= 0, got {blend_epochs}")
+        if blend_steps is not None and blend_steps < 0:
+            raise ValueError(f"blend_steps must be >= 0, got {blend_steps}")
+        if not (0 < final_main_weight <= 1.0):
+            raise ValueError(
+                f"final_main_weight must be in (0, 1], got {final_main_weight}"
+            )
         if temp_start <= 0 or temp_end <= 0:
             raise ValueError("temp_start and temp_end must be positive")
         if temp_decay_steps <= 0:
             raise ValueError(
                 f"temp_decay_steps must be positive, got {temp_decay_steps}"
             )
-        if blend_epochs < 0:
-            raise ValueError(f"blend_epochs must be >= 0, got {blend_epochs}")
 
         self.warmup_loss = warmup_loss
         self.main_loss = main_loss
@@ -140,9 +217,13 @@ class LossWarmupWrapper(nn.Module):
         self.temp_end = float(temp_end)
         self.temp_decay_steps = temp_decay_steps
         self.blend_epochs = blend_epochs
+        self.final_main_weight = float(final_main_weight)
+        self.warmup_steps = warmup_steps if warmup_steps is not None else 0
+        self.blend_steps = blend_steps if blend_steps is not None else 0
+        self._step_mode: bool = warmup_steps is not None
         self.reset_queue_each_epoch = reset_queue_each_epoch
 
-        if hasattr(main_loss, "gather_distributed"):
+        if gather_distributed is not None and hasattr(main_loss, "gather_distributed"):
             main_loss.gather_distributed = gather_distributed  # type: ignore[union-attr]
 
         self._has_temperature: bool = hasattr(main_loss, "temperature")
@@ -181,9 +262,14 @@ class LossWarmupWrapper(nn.Module):
         self.gamma_end: float | None = float(gamma_end) if gamma_end is not None else None
 
         self._epoch: int = 0
+        self._global_step: int = 0  # tracked internally in step mode
         self._switch_step: int | None = None  # global step when main phase began
 
-        if warmup_epochs == 0:
+        # Fast path: no warmup.
+        no_warmup = (self._step_mode and self.warmup_steps == 0) or (
+            not self._step_mode and warmup_epochs == 0
+        )
+        if no_warmup:
             self._switch_step = 0
             self._apply_temperature(self.temp_start)
             if self.gamma_start is not None:
@@ -194,21 +280,29 @@ class LossWarmupWrapper(nn.Module):
     @property
     def in_blend(self) -> bool:
         """Whether the wrapper is currently in the blend phase."""
-        return (
-            not self.in_warmup
-            and self.blend_epochs > 0
-            and self._epoch < self.warmup_epochs + self.blend_epochs
-        )
+        if self.in_warmup:
+            return False
+        if self._step_mode:
+            return (
+                self.blend_steps > 0
+                and self._global_step < self.warmup_steps + self.blend_steps
+            )
+        return self.blend_epochs > 0 and self._epoch < self.warmup_epochs + self.blend_epochs
 
     @property
-    def ap_weight(self) -> float:
-        """Current AP loss weight (0.0 during warmup, ramp during blend, 1.0 after)."""
+    def main_weight(self) -> float:
+        """Current main loss weight (0.0 during warmup, ramps to ``final_main_weight`` during blend, ``final_main_weight`` after)."""
         if self.in_warmup:
             return 0.0
+        if self._step_mode:
+            if self.blend_steps == 0 or self._global_step >= self.warmup_steps + self.blend_steps:
+                return self.final_main_weight
+            blend_step_index = self._global_step - self.warmup_steps
+            return (blend_step_index + 1) / (self.blend_steps + 1) * self.final_main_weight
         if self.blend_epochs == 0 or self._epoch >= self.warmup_epochs + self.blend_epochs:
-            return 1.0
+            return self.final_main_weight
         blend_epoch_index = self._epoch - self.warmup_epochs
-        return (blend_epoch_index + 1) / (self.blend_epochs + 1)
+        return (blend_epoch_index + 1) / (self.blend_epochs + 1) * self.final_main_weight
 
     @property
     def in_warmup(self) -> bool:
@@ -218,9 +312,12 @@ class LossWarmupWrapper(nn.Module):
         Returns
         -------
         bool
-            True while ``_epoch < warmup_epochs``; False once the main
-            loss is active.
+            True while in the warmup phase; False once the main loss is active.
+            In epoch mode: ``_epoch < warmup_epochs``.
+            In step mode: ``_global_step < warmup_steps``.
         """
+        if self._step_mode:
+            return self._global_step < self.warmup_steps
         return self._epoch < self.warmup_epochs
 
     @property
@@ -279,8 +376,14 @@ class LossWarmupWrapper(nn.Module):
         """
         self._epoch = epoch
 
+        if self._step_mode:
+            # Phase transitions are step-driven; only handle queue reset here.
+            if not self.in_warmup and self.reset_queue_each_epoch and self._has_reset_queue:
+                self.main_loss.reset_queue()  # type: ignore[union-attr]
+            return
+
+        # Epoch mode: set sentinel on the first main-phase epoch.
         if not self.in_warmup and self._switch_step is None:
-            # First epoch in the main phase — record switch point.
             # _step is not tracked; we derive temperature from global_step
             # passed to on_train_batch_start, so initialise switch_step lazily.
             self._switch_step = -1  # sentinel; overwritten on first batch hook
@@ -307,6 +410,12 @@ class LossWarmupWrapper(nn.Module):
             Monotonically increasing global step counter, as provided by
             ``self.global_step`` in a LightningModule.
         """
+        if self._step_mode:
+            self._global_step = global_step
+            # In step mode, the sentinel is set here (not in on_train_epoch_start).
+            if not self.in_warmup and self._switch_step is None:
+                self._switch_step = -1  # sentinel; latched below
+
         if self.in_warmup or self._switch_step is None:
             return
 
@@ -390,12 +499,12 @@ class LossWarmupWrapper(nn.Module):
             During warmup or blend: scalar tensor.  After blend: output of
             ``main_loss`` (scalar or tuple when ``return_per_class=True``).
             ``**kwargs`` are forwarded to ``main_loss`` only when
-            ``ap_weight == 1.0``; they are silently ignored during warmup
-            and blend phases.
+            ``main_weight >= 1.0`` (i.e. ``final_main_weight == 1.0`` and
+            the blend period has ended); they are silently ignored otherwise.
         """
         if self.in_warmup:
             return self.warmup_loss(logits, targets)
-        w = self.ap_weight
+        w = self.main_weight
         if w >= 1.0:
             return self.main_loss(logits, targets, **kwargs)
         return (1 - w) * self.warmup_loss(logits, targets) + w * self.main_loss(logits, targets)

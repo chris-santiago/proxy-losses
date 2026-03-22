@@ -6,7 +6,7 @@
 
 - **`SigmoidFocalLoss`** — Binary/multi-label focal loss (Lin et al., ICCV 2017). Sigmoid activation; `alpha` re-balances pos/neg, `gamma` down-weights easy examples. Drop-in replacement for `BCEWithLogitsLoss`.
 - **`SoftmaxFocalLoss`** — Multiclass focal loss with softmax. Supports `mean_positive` reduction (RetinaNet convention: normalize by positive count), per-class `alpha` weighting, label smoothing, and arbitrary spatial/sequence input shapes.
-- **`SmoothAPLoss`** — Differentiable approximation of AP (Brown et al., ECCV 2020). Uses sigmoid-based soft rank estimation; O(M²) in pool size. Supports multi-class, binary, and seq2seq settings.
+- **`SmoothAPLoss`** — Differentiable approximation of AP (Brown et al., ECCV 2020). Uses sigmoid-based soft rank estimation; O(|P|×M) where |P| is the positive count and M = batch + queue size. Supports multi-class, binary, and seq2seq settings.
 - **`RecallAtQuantileLoss`** — Optimizes recall above a score threshold set at the *q*-th quantile of the pooled distribution. Useful for alert/detection workloads (e.g. top 0.5% of scores).
 - **`FocalSmoothAPLoss`** — Focal-modulated Smooth-AP. Weights each positive's AP contribution by its rank-based difficulty `(1 − p_rank)^γ`, suppressing gradient from positives that already rank above most negatives and focusing it on the ones that don't. Optionally up-weights severe pairwise violations in the rank denominator (`alpha`, `beta`). **Gamma must be scheduled** (start at 0, ramp up) to avoid degenerate solutions — see below.
 - **`LossWarmupWrapper`** — Training utility that runs a standard loss (BCE/CE) during warmup, linearly blends into the ranking loss over a configurable transition window, then applies geometric temperature decay and optional linear gamma scheduling. Automatically resets the memory queue at the phase switch to prevent queue poisoning from warmup-era logits.
@@ -74,7 +74,7 @@ AP ≈ (1/|P|) · Σ_{i∈P}  ŝ_i^+ / ŝ_i
 loss = 1 − AP
 ```
 
-**Complexity:** O(M²) in memory and compute where M = batch + queue size. Keep M ≤ ~4096.
+**Complexity:** O(|P|×M) where |P| is the number of positives and M = batch + queue size. At a 0.5% positive rate this is ~200× cheaper than O(M²). Keep M ≤ ~4096.
 
 ### `FocalSmoothAPLoss` — Focal-Modulated Smooth-AP
 
@@ -337,11 +337,11 @@ The schedule clock starts at the moment of phase switch, not at training start.
 `blend_epochs` adds a linear ramp between warmup and pure AP:
 
 ```
-Epoch 0–W-1:  warmup_loss only          (ap_weight = 0)
+Epoch 0–W-1:  warmup_loss only          (main_weight = 0)
 Epoch W:      (1−w)×warmup + w×AP       w = 1/(blend_epochs+1)
 Epoch W+1:    (1−w)×warmup + w×AP       w = 2/(blend_epochs+1)
 ...
-Epoch W+B+:   main_loss only            (ap_weight = 1)
+Epoch W+B+:   main_loss only            (main_weight = 1)
 ```
 
 With `warmup_epochs=2, blend_epochs=2`: epochs 2→`1/3 AP`, 3→`2/3 AP`, 4+→pure AP.
@@ -375,13 +375,13 @@ class MyModel(pl.LightningModule):
         logits, targets = batch
         loss = self.loss_fn(logits, targets)
         self.log("train/loss", loss)
-        self.log("train/ap_weight", self.loss_fn.ap_weight)
+        self.log("train/main_weight", self.loss_fn.main_weight)
         if (t := self.loss_fn.current_temperature) is not None:
             self.log("train/temperature", t)
         return loss
 ```
 
-`**kwargs` (e.g. `return_per_class=True`) are forwarded to `main_loss` only when `ap_weight == 1.0`; silently ignored during warmup and blend phases.
+`**kwargs` (e.g. `return_per_class=True`) are forwarded to `main_loss` only when `main_weight == 1.0`; silently ignored during warmup and blend phases.
 
 ### Parameters
 
@@ -406,7 +406,7 @@ class MyModel(pl.LightningModule):
 |---|---|
 | `in_warmup` | `True` while `epoch < warmup_epochs` |
 | `in_blend` | `True` during the `blend_epochs` transition period |
-| `ap_weight` | Current AP loss weight: `0.0` during warmup, linear ramp during blend, `1.0` after |
+| `main_weight` | Current main loss weight: `0.0` during warmup, linear ramp during blend, `1.0` after |
 | `current_temperature` | Current `main_loss.temperature`, or `None` if unavailable |
 | `current_gamma` | Current `main_loss.gamma` if gamma scheduling is active, `None` otherwise |
 | `on_train_epoch_start(epoch)` | Advance epoch counter; detect phase switch; optionally reset queue |
@@ -478,7 +478,7 @@ uv sync --extra demo
 
 ### `toy_demo.py` — single-run trace
 
-Trains one model (warmup → blend → AP) and prints epoch-by-epoch phase, ap_weight, temperature, loss, and AUCPR.
+Trains one model (warmup → blend → AP) and prints epoch-by-epoch phase, main_weight, temperature, loss, and AUCPR.
 
 ```bash
 python examples/toy_demo.py                    # default: 3 warmup + 2 blend epochs
