@@ -741,3 +741,333 @@ class TestForwardBlend:
                 targets = torch.randint(0, self.C, (self.B,))
                 loss = wrapper(logits, targets)
                 loss.backward()
+
+
+# ---------------------------------------------------------------------------
+# Step mode — validation and basic behaviour
+# ---------------------------------------------------------------------------
+
+
+def _make_step_wrapper(
+    warmup_steps: int = 5,
+    temp_start: float = 0.1,
+    temp_end: float = 0.01,
+    temp_decay_steps: int = 100,
+    *,
+    blend_steps: int = 0,
+    main_loss: nn.Module | None = None,
+) -> LossWarmupWrapper:
+    if main_loss is None:
+        main_loss = SmoothAPLoss(num_classes=4, queue_size=0)
+    return LossWarmupWrapper(
+        warmup_loss=nn.CrossEntropyLoss(),
+        main_loss=main_loss,
+        warmup_steps=warmup_steps,
+        temp_start=temp_start,
+        temp_end=temp_end,
+        temp_decay_steps=temp_decay_steps,
+        blend_steps=blend_steps,
+    )
+
+
+class TestStepModeInit:
+    def test_step_mode_flag_set(self):
+        w = _make_step_wrapper(warmup_steps=10)
+        assert w._step_mode is True
+
+    def test_epoch_mode_flag_unset(self):
+        w = _make_wrapper(warmup_epochs=2)
+        assert w._step_mode is False
+
+    def test_conflicting_warmup_params_raises(self):
+        with pytest.raises(ValueError, match="warmup_epochs.*warmup_steps|warmup_steps.*warmup_epochs"):
+            LossWarmupWrapper(
+                warmup_loss=nn.CrossEntropyLoss(),
+                main_loss=SmoothAPLoss(num_classes=4, queue_size=0),
+                warmup_epochs=5,
+                warmup_steps=100,
+                temp_start=0.1,
+                temp_end=0.01,
+                temp_decay_steps=10,
+            )
+
+    def test_conflicting_blend_params_raises(self):
+        with pytest.raises(ValueError, match="blend_epochs.*blend_steps|blend_steps.*blend_epochs"):
+            LossWarmupWrapper(
+                warmup_loss=nn.CrossEntropyLoss(),
+                main_loss=SmoothAPLoss(num_classes=4, queue_size=0),
+                warmup_steps=10,
+                blend_epochs=2,
+                blend_steps=20,
+                temp_start=0.1,
+                temp_end=0.01,
+                temp_decay_steps=10,
+            )
+
+    def test_negative_warmup_steps_raises(self):
+        with pytest.raises(ValueError, match="warmup_steps"):
+            LossWarmupWrapper(
+                warmup_loss=nn.CrossEntropyLoss(),
+                main_loss=SmoothAPLoss(num_classes=4, queue_size=0),
+                warmup_steps=-1,
+                temp_start=0.1,
+                temp_end=0.01,
+                temp_decay_steps=10,
+            )
+
+    def test_negative_blend_steps_raises(self):
+        with pytest.raises(ValueError, match="blend_steps"):
+            LossWarmupWrapper(
+                warmup_loss=nn.CrossEntropyLoss(),
+                main_loss=SmoothAPLoss(num_classes=4, queue_size=0),
+                warmup_steps=5,
+                blend_steps=-1,
+                temp_start=0.1,
+                temp_end=0.01,
+                temp_decay_steps=10,
+            )
+
+    def test_warmup_steps_zero_fast_path(self):
+        w = _make_step_wrapper(warmup_steps=0)
+        assert w._switch_step == 0
+        assert not w.in_warmup
+
+    def test_warmup_steps_zero_sets_temp_start(self):
+        w = _make_step_wrapper(warmup_steps=0, temp_start=0.07)
+        assert w.current_temperature == pytest.approx(0.07)
+
+
+class TestStepModeInWarmup:
+    def test_in_warmup_true_before_warmup_steps(self):
+        w = _make_step_wrapper(warmup_steps=5)
+        for step in range(5):
+            w.on_train_batch_start(step)
+            assert w.in_warmup
+
+    def test_in_warmup_false_at_warmup_steps(self):
+        w = _make_step_wrapper(warmup_steps=5)
+        w.on_train_batch_start(5)
+        assert not w.in_warmup
+
+    def test_in_warmup_false_after_warmup_steps(self):
+        w = _make_step_wrapper(warmup_steps=5)
+        w.on_train_batch_start(100)
+        assert not w.in_warmup
+
+    def test_switch_step_latched_on_first_main_batch(self):
+        w = _make_step_wrapper(warmup_steps=5)
+        for step in range(5):
+            w.on_train_batch_start(step)
+        assert w._switch_step is None
+        # In step mode the sentinel is set and consumed within the same call,
+        # so _switch_step goes directly from None to the latched value.
+        w.on_train_batch_start(5)
+        assert w._switch_step == 5
+
+    def test_switch_step_not_overwritten(self):
+        w = _make_step_wrapper(warmup_steps=3)
+        w.on_train_batch_start(3)  # latch at step 3
+        assert w._switch_step == 3
+        for step in range(4, 10):
+            w.on_train_batch_start(step)
+        assert w._switch_step == 3
+
+
+class TestStepModeTemperature:
+    def test_temp_set_to_start_on_switch(self):
+        w = _make_step_wrapper(warmup_steps=3, temp_start=0.08)
+        w.on_train_batch_start(3)
+        assert w.current_temperature == pytest.approx(0.08)
+
+    def test_temp_decays_after_switch(self):
+        w = _make_step_wrapper(
+            warmup_steps=0, temp_start=0.1, temp_end=0.01, temp_decay_steps=100
+        )
+        w.on_train_batch_start(50)
+        expected = 0.1 * math.exp(0.5 * math.log(0.01 / 0.1))
+        assert w.current_temperature == pytest.approx(expected, rel=1e-6)
+
+    def test_temp_clamped_at_temp_end(self):
+        w = _make_step_wrapper(
+            warmup_steps=0, temp_start=0.1, temp_end=0.01, temp_decay_steps=10
+        )
+        w.on_train_batch_start(999)
+        assert w.current_temperature == pytest.approx(0.01, rel=1e-6)
+
+    def test_temp_decay_relative_to_switch_step(self):
+        w = _make_step_wrapper(
+            warmup_steps=50, temp_start=0.1, temp_end=0.01, temp_decay_steps=100
+        )
+        w.on_train_batch_start(50)   # latch: switch_step=50
+        w.on_train_batch_start(100)  # elapsed=50
+        expected = 0.1 * math.exp(0.5 * math.log(0.01 / 0.1))
+        assert w.current_temperature == pytest.approx(expected, rel=1e-6)
+
+
+class TestStepModeBlend:
+    def test_in_blend_true_during_blend_steps(self):
+        w = _make_step_wrapper(warmup_steps=5, blend_steps=10)
+        for step in range(5, 15):
+            w.on_train_batch_start(step)
+            assert w.in_blend, f"expected in_blend at step {step}"
+
+    def test_in_blend_false_after_blend_steps(self):
+        w = _make_step_wrapper(warmup_steps=5, blend_steps=10)
+        w.on_train_batch_start(15)
+        assert not w.in_blend
+
+    def test_in_blend_false_during_warmup(self):
+        w = _make_step_wrapper(warmup_steps=5, blend_steps=10)
+        for step in range(5):
+            w.on_train_batch_start(step)
+            assert not w.in_blend
+
+    def test_ap_weight_zero_during_warmup(self):
+        w = _make_step_wrapper(warmup_steps=5, blend_steps=5)
+        for step in range(5):
+            w.on_train_batch_start(step)
+            assert w.ap_weight == 0.0
+
+    def test_ap_weight_ramp_during_blend(self):
+        w = _make_step_wrapper(warmup_steps=0, blend_steps=3)
+        # blend_step_index 0,1,2 → weights 1/4, 2/4, 3/4
+        w.on_train_batch_start(0)
+        assert w.ap_weight == pytest.approx(1 / 4)
+        w.on_train_batch_start(1)
+        assert w.ap_weight == pytest.approx(2 / 4)
+        w.on_train_batch_start(2)
+        assert w.ap_weight == pytest.approx(3 / 4)
+
+    def test_ap_weight_one_after_blend(self):
+        w = _make_step_wrapper(warmup_steps=0, blend_steps=3)
+        w.on_train_batch_start(3)
+        assert w.ap_weight == 1.0
+
+    def test_ap_weight_one_with_no_blend_steps(self):
+        w = _make_step_wrapper(warmup_steps=2, blend_steps=0)
+        w.on_train_batch_start(2)
+        assert w.ap_weight == 1.0
+
+
+class TestStepModeForward:
+    C, B = 4, 16
+
+    def _batch(self):
+        return torch.randn(self.B, self.C), torch.randint(0, self.C, (self.B,))
+
+    def test_warmup_loss_during_warmup(self):
+        mock_warmup = MagicMock(return_value=torch.tensor(1.0))
+        mock_main = MagicMock(spec=SmoothAPLoss)
+        type(mock_main).temperature = 0.01
+        w = LossWarmupWrapper(
+            warmup_loss=mock_warmup,
+            main_loss=mock_main,
+            warmup_steps=5,
+            temp_start=0.1,
+            temp_end=0.01,
+            temp_decay_steps=10,
+        )
+        w.on_train_batch_start(3)
+        logits, targets = self._batch()
+        w(logits, targets)
+        mock_warmup.assert_called_once_with(logits, targets)
+        mock_main.assert_not_called()
+
+    def test_main_loss_after_warmup(self):
+        main = SmoothAPLoss(num_classes=self.C, queue_size=0)
+        w = _make_step_wrapper(warmup_steps=5, main_loss=main)
+        w.on_train_batch_start(5)
+        logits, targets = self._batch()
+        loss = w(logits, targets)
+        assert loss.ndim == 0
+
+    def test_gradient_flows_during_warmup(self):
+        w = _make_step_wrapper(warmup_steps=10)
+        w.on_train_batch_start(0)
+        logits = torch.randn(self.B, self.C, requires_grad=True)
+        targets = torch.randint(0, self.C, (self.B,))
+        w(logits, targets).backward()
+        assert logits.grad is not None and logits.grad.norm() > 0
+
+    def test_gradient_flows_after_warmup(self):
+        w = _make_step_wrapper(warmup_steps=5)
+        w.on_train_batch_start(5)
+        logits = torch.randn(self.B, self.C, requires_grad=True)
+        targets = torch.randint(0, self.C, (self.B,))
+        w(logits, targets).backward()
+        assert logits.grad is not None and logits.grad.norm() > 0
+
+    def test_blend_arithmetic(self):
+        warmup = nn.CrossEntropyLoss()
+        main = SmoothAPLoss(num_classes=self.C, queue_size=0)
+        w = LossWarmupWrapper(
+            warmup_loss=warmup,
+            main_loss=main,
+            warmup_steps=0,
+            blend_steps=3,
+            temp_start=0.1,
+            temp_end=0.01,
+            temp_decay_steps=100,
+        )
+        w.on_train_batch_start(1)  # blend step 1 → ap_weight = 2/4 = 0.5
+        logits, targets = self._batch()
+        with torch.no_grad():
+            blended = w(logits, targets)
+            wt = w.ap_weight
+            expected = (1 - wt) * warmup(logits, targets) + wt * main(logits, targets)
+        assert blended == pytest.approx(expected.item(), rel=1e-5)
+
+
+class TestStepModeIntegration:
+    C, B = 4, 16
+
+    def _batch(self):
+        return torch.randn(self.B, self.C), torch.randint(0, self.C, (self.B,))
+
+    def test_full_step_loop_no_errors(self):
+        wrapper = LossWarmupWrapper(
+            warmup_loss=nn.CrossEntropyLoss(),
+            main_loss=SmoothAPLoss(num_classes=self.C, queue_size=32),
+            warmup_steps=10,
+            blend_steps=5,
+            temp_start=0.1,
+            temp_end=0.005,
+            temp_decay_steps=20,
+        )
+        for step in range(40):
+            wrapper.on_train_batch_start(step)
+            logits = torch.randn(self.B, self.C, requires_grad=True)
+            targets = torch.randint(0, self.C, (self.B,))
+            wrapper(logits, targets).backward()
+
+    def test_temperature_monotone_in_step_loop(self):
+        wrapper = _make_step_wrapper(
+            warmup_steps=5, temp_start=0.1, temp_end=0.005, temp_decay_steps=50
+        )
+        temps = []
+        for step in range(60):
+            wrapper.on_train_batch_start(step)
+            if not wrapper.in_warmup:
+                temps.append(wrapper.current_temperature)
+        assert len(temps) > 0
+        for a, b in zip(temps, temps[1:]):
+            assert a >= b - 1e-9
+
+    def test_switch_step_invariant(self):
+        wrapper = _make_step_wrapper(warmup_steps=5)
+        wrapper.on_train_batch_start(5)
+        first_switch = wrapper._switch_step
+        for step in range(6, 30):
+            wrapper.on_train_batch_start(step)
+        assert wrapper._switch_step == first_switch
+
+    def test_queue_reset_at_step_switch(self):
+        main = SmoothAPLoss(num_classes=4, queue_size=16)
+        w = _make_step_wrapper(warmup_steps=5, main_loss=main)
+        main.training = True
+        logits = torch.randn(4, 4)
+        tgts = torch.randint(0, 4, (4,))
+        main(logits, tgts)
+        assert int(main._q_ptr) > 0
+        w.on_train_batch_start(5)  # triggers reset
+        assert int(main._q_ptr) == 0

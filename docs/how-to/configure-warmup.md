@@ -1,8 +1,10 @@
 # Configure Warmup and Blending
 
-`LossWarmupWrapper` manages a three-phase training schedule: warmup, optional blend, and main (ranking) phase with geometric temperature decay.
+`LossWarmupWrapper` manages a three-phase training schedule: warmup, optional linear blend, and main (ranking) phase with geometric temperature decay.
 
-## Minimal setup
+Warmup and blend can be specified in **epochs** or **steps** — use whichever maps more naturally to your training setup. The two styles are mutually exclusive per axis (`warmup_epochs` vs `warmup_steps`, `blend_epochs` vs `blend_steps`).
+
+## Epoch-based warmup
 
 ```python
 from imbalanced_losses import SmoothAPLoss, LossWarmupWrapper
@@ -18,9 +20,7 @@ loss_fn = LossWarmupWrapper(
 )
 ```
 
-## Wire up the training-loop hooks
-
-Call the hooks on every epoch and every batch. In plain PyTorch:
+Call both hooks in your training loop:
 
 ```python
 global_step = 0
@@ -53,25 +53,60 @@ class MyModel(pl.LightningModule):
         return self.loss_fn(logits, targets)
 ```
 
-**Confirm:** `loss_fn.in_warmup` is `True` for the first `warmup_epochs` epochs and `False` after.
+## Step-based warmup
 
-## Add a blend period
-
-`blend_epochs` adds a linear ramp between warmup and pure AP loss, avoiding an abrupt gradient change:
+Prefer steps when your effective epoch length varies (e.g. multi-dataset sampling, streaming data) or when you want fine-grained control:
 
 ```python
 loss_fn = LossWarmupWrapper(
     warmup_loss=nn.CrossEntropyLoss(),
     main_loss=SmoothAPLoss(num_classes=10, queue_size=1024),
-    warmup_epochs=5,
-    blend_epochs=3,          # 3-epoch ramp
+    warmup_steps=5_000,
     temp_start=0.1,
     temp_end=0.01,
     temp_decay_steps=10_000,
 )
 ```
 
-During the blend, `loss_fn.ap_weight` increases from `1/4` to `3/4` in equal steps:
+In step mode **only `on_train_batch_start` is required** — the epoch hook is optional (only needed for `reset_queue_each_epoch`):
+
+```python
+for step, batch in enumerate(dataloader):
+    loss_fn.on_train_batch_start(step)
+    logits, targets = batch
+    loss = loss_fn(logits, targets)
+    loss.backward()
+    optimizer.step()
+    optimizer.zero_grad()
+```
+
+In PyTorch Lightning:
+
+```python
+class MyModel(pl.LightningModule):
+    def on_train_batch_start(self, batch, batch_idx):
+        self.loss_fn.on_train_batch_start(self.global_step)
+
+    def training_step(self, batch, batch_idx):
+        logits, targets = batch
+        return self.loss_fn(logits, targets)
+```
+
+**Confirm:** `loss_fn.in_warmup` is `True` for the first `warmup_steps` steps and `False` after.
+
+## Add a blend period
+
+`blend_epochs` / `blend_steps` adds a linear ramp between warmup and pure AP loss, avoiding an abrupt gradient change.
+
+**Epoch blend:**
+
+```python
+loss_fn = LossWarmupWrapper(
+    ...,
+    warmup_epochs=5,
+    blend_epochs=3,   # 3-epoch ramp
+)
+```
 
 | Epoch | Phase | `ap_weight` |
 |---|---|---|
@@ -80,6 +115,18 @@ During the blend, `loss_fn.ap_weight` increases from `1/4` to `3/4` in equal ste
 | 6 | blend | 0.50 |
 | 7 | blend | 0.75 |
 | 8+ | main | 1.0 |
+
+**Step blend:**
+
+```python
+loss_fn = LossWarmupWrapper(
+    ...,
+    warmup_steps=5_000,
+    blend_steps=3_000,  # 3000-step ramp
+)
+```
+
+`ap_weight` follows the same `(k + 1) / (blend_steps + 1)` formula per step.
 
 ## Tune temperature decay
 
@@ -112,11 +159,21 @@ loss_fn = LossWarmupWrapper(
 )
 ```
 
+In step mode, also call `on_train_epoch_start` so the wrapper knows when each epoch begins:
+
+```python
+for epoch in range(total_epochs):
+    loss_fn.on_train_epoch_start(epoch)
+    for step, batch in enumerate(dataloader):
+        loss_fn.on_train_batch_start(global_step)
+        ...
+```
+
 **Note:** The wrapper always resets the queue automatically at the warmup-to-main phase switch, regardless of this setting.
 
 ## Skip warmup entirely
 
-Set `warmup_epochs=0` to start directly with the ranking loss. Temperature is set to `temp_start` immediately:
+Pass `warmup_epochs=0` (epoch mode) or `warmup_steps=0` (step mode) to start directly with the ranking loss:
 
 ```python
 loss_fn = LossWarmupWrapper(
