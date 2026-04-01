@@ -91,3 +91,4 @@ nav:
     - Memory Queue Design: explanation/memory-queue.md
     - Temperature and Soft Ranking: explanation/temperature-soft-ranking.md
     - DDP All-Gather and Gradients: explanation/ddp-all-gather.md
+    - Assumptions and Failure Modes: explanation/assumptions-and-failure-modes.md

@@ -37,6 +37,10 @@ Average Precision (AP) and Recall at a threshold are ranking metrics: they depen
 | Fixed operating point (top N% flagged) | `RecallAtQuantileLoss` |
 | Early unstable gradients from ranking loss | `LossWarmupWrapper` with warmup on CE/BCE |
 
+## Assumptions and failure modes
+
+Each loss makes assumptions about the data, the model, and the training regime. Understanding when those assumptions break helps you decide whether a given loss is appropriate for your problem. See [Assumptions and Failure Modes](assumptions-and-failure-modes.md) for a detailed per-loss analysis.
+
 ## Trade-offs
 
 **Focal loss** is fast (O(N)), requires no queue, and is a drop-in replacement. It does not directly optimize AP.
