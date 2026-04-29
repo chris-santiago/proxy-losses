@@ -201,9 +201,9 @@ You trained the same model architecture with three different loss strategies and
 
 | Loss strategy | AUCPR |
 |---|---|
-| Vanilla BCE | 0.20 |
-| Focal Loss | 0.21 |
-| Smooth-AP with warmup | 0.42 |
+| Vanilla BCE | 0.1822 |
+| Focal Loss | 0.1874 |
+| Smooth-AP with warmup | 0.4248 |
 
 ## Next steps
 
@@ -211,3 +211,4 @@ You trained the same model architecture with three different loss strategies and
 - [Use Ranking Losses](../how-to/use-ranking-losses.md) — queue sizing, temperature, binary vs. multi-class
 - [Configure Warmup and Blending](../how-to/configure-warmup.md) — tuning the phase schedule
 - [Train with DDP](../how-to/train-with-ddp.md) — multi-GPU setup
+- `examples/binary_imbalance_demo.py` — sweeps positive rates from 25 % down to 0.5 % to show where `SmoothAPLoss` earns its largest gains
