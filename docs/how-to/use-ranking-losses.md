@@ -60,7 +60,9 @@ loss = loss_fn(logits, targets)
 
 Without `max_pool_size`, a batch of 30 sequences × 512 tokens produces a pool of 15 360 rows. `SmoothAPLoss` builds a `[|P|, M]` pairwise matrix per class and retains the autograd graph across all classes simultaneously — peak memory is O(M²) and easily OOMs on GPU.
 
-`max_pool_size` caps the pool with stratified random subsampling: at least one row per observed class is guaranteed before the remaining budget is filled uniformly. The queue is unaffected — it continues to accumulate the original full batch.
+`max_pool_size` caps the pool using minimum-quota subsampling: each observed class receives an equal reserved quota of `max_pool_size // (2 × n_classes)` rows, then the remaining budget is filled uniformly at random. The queue is unaffected — it continues to accumulate the original full batch.
+
+This is **not** proportional sampling. A dominant background class and a rare foreground class receive the same quota, so rare classes are over-represented relative to their natural frequency. The practical consequence: effective `|P_c| ≈ max_pool_size // (2 × n_classes)`, not `max_pool_size × positive_rate`. Size `max_pool_size` from the target positive count, not from memory alone.
 
 | Setting | Effect |
 |---|---|

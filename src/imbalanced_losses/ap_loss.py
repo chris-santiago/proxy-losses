@@ -73,10 +73,14 @@ class SmoothAPLoss(nn.Module):
         so safe to construct before ``dist.init_process_group``. Default: None.
     max_pool_size : int or None, optional
         Maximum number of rows in the ranking pool (live batch + queue after
-        ignore_index filtering).  When the pool exceeds this value, stratified
-        random subsampling is applied: at least one row per observed target
-        class is guaranteed before filling the remaining budget uniformly.
-        ``None`` (default) disables the cap.
+        ignore_index filtering).  When the pool exceeds this value,
+        minimum-quota subsampling is applied: each observed class is guaranteed
+        an equal quota of rows (``max_pool_size // (2 * n_classes)``), then
+        the remaining budget is filled uniformly at random.  This is not
+        proportional sampling — rare classes are over-represented relative to
+        their natural frequency.  Effective ``|P_c| ≈ max_pool_size //
+        (2 * n_classes)``; size accordingly.  ``None`` (default) disables
+        the cap.
 
         Use this for seq2seq tasks where flattened inputs produce very large
         pools. The pairwise matrix in ``_compute_smooth_ap`` is ``[P, M]``
@@ -412,8 +416,8 @@ class SmoothAPLoss(nn.Module):
             if not self._subsample_warned:
                 warnings.warn(
                     f"SmoothAPLoss: pool size {all_logits.size(0)} exceeds "
-                    f"max_pool_size={self.max_pool_size}; applying stratified "
-                    f"subsampling. Loss is now a stochastic approximation. "
+                    f"max_pool_size={self.max_pool_size}; applying "
+                    f"minimum-quota subsampling. Loss is now a stochastic approximation. "
                     f"(This warning is shown once per instance.)",
                     UserWarning,
                     stacklevel=2,

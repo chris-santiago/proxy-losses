@@ -17,12 +17,20 @@ def subsample_pool(
     max_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Stratified random subsample of a ranking pool to at most *max_size* rows.
+    Minimum-quota subsample of a ranking pool to at most *max_size* rows.
 
     When ``M <= max_size`` the inputs are returned unchanged (zero copy).
-    When ``M > max_size``, stratified sampling guarantees at least one row
-    per observed target class before filling the remaining budget uniformly
-    at random from the unselected rows.
+    When ``M > max_size``, each observed class is guaranteed a minimum quota
+    of rows before the remaining budget is filled uniformly at random from
+    the unselected rows.
+
+    This is **not** proportional (stratified) sampling.  Proportional sampling
+    would allocate rows in proportion to class frequency; this algorithm gives
+    every observed class an equal quota regardless of frequency.  A dominant
+    class (e.g. background) and a rare class receive the same reserved count.
+    The consequence is that rare classes are over-represented relative to their
+    natural frequency — intentionally so, to ensure they contribute gradient
+    signal — while the remainder of the budget is filled uniformly.
 
     Parameters
     ----------
@@ -41,14 +49,20 @@ def subsample_pool(
 
     Notes
     -----
-    The stratified guarantee is:
-        per_class_budget = max(1, max_size // (2 * num_observed_classes))
-        reserved_per_class = min(class_count, per_class_budget)
+    The quota formula is:
+        per_class_quota = max(1, max_size // (2 * num_observed_classes))
+        reserved_per_class = min(class_count, per_class_quota)
 
-    Half the budget is reserved for class guarantees; the other half is
+    Half the budget is reserved for class quotas; the other half is
     filled with uniform random draws from remaining indices.  If the
     reserved set already fills *max_size* (only at very small max_size),
     it is randomly truncated.
+
+    Important: because the quota is equal per class, the effective positive
+    rate in the subsampled pool can be much higher than in the original pool
+    when one class dominates (e.g. a background class at 99%+ frequency).
+    This inflates ``|P_c|`` and therefore pairwise matrix memory.  Size
+    ``max_pool_size`` accordingly: ``|P_c| ≈ max_pool_size // (2 * n_classes)``.
     """
     m = logits.size(0)
     if m <= max_size:
