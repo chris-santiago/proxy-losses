@@ -82,13 +82,15 @@ If `batch_size + queue_size` is too small to accumulate enough positives, the so
 
 After flattening a seq2seq batch from `[B, T, C]` to `[B*T, C]`, the pool size M = B × T can be very large (e.g. 30 × 512 = 15 360). The pairwise matrix `[|P|, M]` in the soft rank computation, retained for all C classes simultaneously in the autograd graph, causes O(M²) peak memory and will OOM even with `queue_size=0` and a reduced batch size.
 
-Use `max_pool_size` to cap the pool with stratified random subsampling:
+Use `max_pool_size` to cap the pool with minimum-quota subsampling:
 
 ```python
 loss_fn = SmoothAPLoss(num_classes=C, queue_size=1024, max_pool_size=4096)
 ```
 
 The queue accumulates the original full batch (unaffected by the cap). A one-time `UserWarning` fires when subsampling first triggers. Because the subsampled pool is a random subset, the loss value varies across steps for identical inputs — this is expected and analogous to dropout noise.
+
+**Sizing `max_pool_size` with a dominant background class:** the subsampler gives every observed class an equal quota (`max_pool_size // (2 × n_classes)`), not a proportional one. A dominant class (e.g. 99% background) and a rare class get the same reserved count, so rare classes are over-represented in the subsampled pool. The effective positive count per class is `|P_c| ≈ max_pool_size // (2 × n_classes)` — much higher than `max_pool_size × positive_rate` would suggest. Size from the target `|P_c|`, not from memory alone: `max_pool_size ≈ target_|P_c| × 2 × n_classes`.
 
 **Temperature too low in early training**
 
