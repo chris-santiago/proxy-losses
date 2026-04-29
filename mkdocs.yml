@@ -70,6 +70,7 @@ nav:
   - Tutorials:
     - tutorials/index.md
     - Getting Started: tutorials/getting-started.md
+    - Multiclass Classification: tutorials/multiclass-classification.md
   - How-To Guides:
     - how-to/index.md
     - Use Focal Loss: how-to/use-focal-loss.md
@@ -77,6 +78,7 @@ nav:
     - Configure Warmup and Blending: how-to/configure-warmup.md
     - Train with DDP: how-to/train-with-ddp.md
     - Log Per-Class Metrics: how-to/log-per-class-metrics.md
+    - Migrate from BCE / CrossEntropyLoss: how-to/migrate-from-cross-entropy.md
   - Reference:
     - reference/index.md
     - SigmoidFocalLoss: reference/sigmoid-focal-loss.md

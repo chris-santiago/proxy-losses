@@ -9,3 +9,4 @@ How-to guides are goal-oriented recipes. Each one solves a specific task — ass
 - [**Configure Warmup and Blending**](configure-warmup.md) — tune phase schedules, blend epochs, and temperature decay in `LossWarmupWrapper`
 - [**Train with DDP**](train-with-ddp.md) — multi-GPU all-gather setup for all losses
 - [**Log Per-Class Metrics**](log-per-class-metrics.md) — retrieve per-class loss tensors without a second forward pass
+- [**Migrate from BCE / CrossEntropyLoss**](migrate-from-cross-entropy.md) — drop-in migration checklist, common mistakes, and a decision table for choosing the right loss
